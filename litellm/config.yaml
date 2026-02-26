@@ -1,0 +1,108 @@
+# AgentFlow v2 — LiteLLM Config
+# Ollama-first: routes to local models when available, falls back to cloud
+
+model_list:
+  # ── Local Ollama Models (auto-discovered) ────────────────
+  - model_name: llama3.2
+    litellm_params:
+      model: ollama/llama3.2
+      api_base: http://ollama:11434
+
+  - model_name: llama3.2:latest
+    litellm_params:
+      model: ollama/llama3.2:latest
+      api_base: http://ollama:11434
+
+  - model_name: llama3.1:8b
+    litellm_params:
+      model: ollama/llama3.1:8b
+      api_base: http://ollama:11434
+
+  - model_name: qwen2.5-coder:7b
+    litellm_params:
+      model: ollama/qwen2.5-coder:7b
+      api_base: http://ollama:11434
+
+  - model_name: deepseek-r1:8b
+    litellm_params:
+      model: ollama/deepseek-r1:8b
+      api_base: http://ollama:11434
+
+  - model_name: phi4
+    litellm_params:
+      model: ollama/phi4
+      api_base: http://ollama:11434
+
+  # ── Cloud: Anthropic ─────────────────────────────────────
+  - model_name: claude-sonnet-4-6
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: anthropic/claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: claude-haiku-4-5
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # ── Cloud: OpenAI ────────────────────────────────────────
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # ── Cloud: Groq (fast inference, free tier) ──────────────
+  - model_name: llama3-groq-70b
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+
+  # ── Smart aliases ────────────────────────────────────────
+  # "auto" routes: tries local first, falls back to cloud
+  - model_name: auto
+    litellm_params:
+      model: llama3.2:latest
+      api_base: http://ollama:11434
+      fallbacks: ["gpt-4o-mini", "claude-haiku-4-5"]
+
+  - model_name: auto-smart
+    litellm_params:
+      model: llama3.1:8b
+      api_base: http://ollama:11434
+      fallbacks: ["claude-sonnet-4-6", "gpt-4o"]
+
+  - model_name: auto-code
+    litellm_params:
+      model: qwen2.5-coder:7b
+      api_base: http://ollama:11434
+      fallbacks: ["claude-sonnet-4-6"]
+
+litellm_settings:
+  cache: true
+  cache_params:
+    type: redis
+    host: redis
+    port: 6379
+    password: os.environ/REDIS_PASSWORD
+    ttl: 300
+  drop_params: true
+  num_retries: 2
+  request_timeout: 300
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+  langfuse_public_key: os.environ/LANGFUSE_PUBLIC_KEY
+  langfuse_secret_key: os.environ/LANGFUSE_SECRET_KEY
+  langfuse_host: os.environ/LANGFUSE_HOST
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  store_model_in_db: true
