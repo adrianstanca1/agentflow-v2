@@ -758,6 +758,65 @@ async def openclaw_models():
             result.append({"name": m, "installed": True, "recommended": False})
     return result
 
+
+# ── OpenClaw PTY WebSocket Terminal ───────────────────────────────────────────
+@app.websocket("/ws/terminal/{session_id}")
+async def terminal_ws(ws: WebSocket, session_id: str,
+                      cwd: str = "/", model: str = "qwen2.5-coder:7b"):
+    await ws.accept()
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "openclaw"))
+    try:
+        from openclaw.terminal import pty_websocket_handler
+        await pty_websocket_handler(ws, session_id, cwd or os.getcwd(), model)
+    except ImportError as e:
+        await ws.send_json({"type": "error", "message": f"Terminal not available: {e}"})
+    except Exception as e:
+        try: await ws.send_json({"type": "error", "message": str(e)})
+        except: pass
+
+
+@app.get("/openclaw/session/{session_id}/files")
+async def session_files(session_id: str, path: str = "."):
+    """List files for the file explorer panel."""
+    cwd = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+    if not os.path.exists(cwd):
+        raise HTTPException(404, "Path not found")
+    items = []
+    skip = {"node_modules", "__pycache__", ".git", ".venv", "dist", "build"}
+    try:
+        for entry in sorted(os.scandir(cwd), key=lambda e: (e.is_file(), e.name.lower())):
+            if entry.name.startswith(".") or entry.name in skip:
+                continue
+            stat = entry.stat()
+            items.append({
+                "name": entry.name,
+                "path": entry.path,
+                "is_dir": entry.is_dir(),
+                "size": stat.st_size if entry.is_file() else 0,
+                "modified": stat.st_mtime,
+            })
+    except PermissionError:
+        pass
+    return {"path": cwd, "items": items}
+
+
+@app.get("/openclaw/session/{session_id}/read")
+async def read_file_api(session_id: str, path: str):
+    """Read a file for the editor panel."""
+    if not os.path.exists(path):
+        raise HTTPException(404, "File not found")
+    if os.path.getsize(path) > 500_000:
+        raise HTTPException(413, "File too large (>500KB)")
+    try:
+        content = open(path, errors="replace").read()
+        ext = os.path.splitext(path)[1].lstrip(".")
+        return {"path": path, "content": content, "extension": ext,
+                "lines": content.count("\n") + 1}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 # ── Serve React frontend ───────────────────────────────────────────────────────
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")

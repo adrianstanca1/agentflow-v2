@@ -955,40 +955,61 @@ function KnowledgePage() {
 
 // Settings Page
 
+
 // ─── OpenClaw Page ─────────────────────────────────────────────────────────────
 function OpenClawPage() {
-  const [task, setTask] = useState("");
   const [model, setModel] = useState("qwen2.5-coder:7b");
   const [cwd, setCwd] = useState(".");
-  const [sessionId] = useState(() => Math.random().toString(36).slice(2));
+  const [sessionId] = useState(() => "oc-" + Math.random().toString(36).slice(2, 8));
+  const [task, setTask] = useState("");
   const [events, setEvents] = useState<Array<{type: string; content: any; ts: number}>>([]);
   const [running, setRunning] = useState(false);
   const [models, setModels] = useState<Array<{name: string; installed: boolean; recommended: boolean}>>([]);
-  const eventsEndRef = useRef<HTMLDivElement>(null);
+  const [files, setFiles] = useState<Array<{name: string; path: string; is_dir: boolean; size: number}>>([]);
+  const [openFile, setOpenFile] = useState<{path: string; content: string; extension: string; lines?: number} | null>(null);
+  const [activeTab, setActiveTab] = useState<"agent" | "files" | "editor">("agent");
   const abortRef = useRef<AbortController | null>(null);
+  const eventsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     apiFetch("/openclaw/models").then(setModels).catch(() => {});
   }, []);
 
   useEffect(() => {
+    loadFiles(cwd);
+  }, [cwd]);
+
+  useEffect(() => {
     eventsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [events]);
+
+  const loadFiles = async (path: string) => {
+    try {
+      const data = await apiFetch(`/openclaw/session/${sessionId}/files?path=${encodeURIComponent(path)}`);
+      setFiles(data.items || []);
+    } catch { setFiles([]); }
+  };
+
+  const openFileContent = async (path: string) => {
+    try {
+      const data = await apiFetch(`/openclaw/session/${sessionId}/read?path=${encodeURIComponent(path)}`);
+      setOpenFile(data);
+      setActiveTab("editor");
+    } catch {}
+  };
 
   const installed = models.filter(m => m.installed);
 
   const run = async () => {
     if (!task.trim() || running) return;
     setRunning(true);
-    setEvents([]);
-    abortRef.current = new AbortController();
     const taskText = task;
     setTask("");
-
-    setEvents([{ type: "user", content: taskText, ts: Date.now() }]);
+    setEvents(prev => [...prev, { type: "user", content: taskText, ts: Date.now() }]);
+    abortRef.current = new AbortController();
 
     try {
-      const response = await fetch(`${window.location.origin}/openclaw/run`, {
+      const response = await fetch(`/openclaw/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ task: taskText, model, cwd, session_id: sessionId, stream: true }),
@@ -997,7 +1018,6 @@ function OpenClawPage() {
 
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
-      let streamText = "";
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1008,18 +1028,18 @@ function OpenClawPage() {
           try {
             const evt = JSON.parse(line.slice(6));
             if (evt.event_type === "stream_token") {
-              streamText += evt.content;
               setEvents(prev => {
                 const last = prev[prev.length - 1];
-                if (last?.type === "stream") {
-                  return [...prev.slice(0, -1), { ...last, content: last.content + evt.content }];
-                }
+                if (last?.type === "stream") return [...prev.slice(0, -1), { ...last, content: last.content + evt.content }];
                 return [...prev, { type: "stream", content: evt.content, ts: Date.now() }];
               });
             } else if (evt.event_type === "tool_call") {
               setEvents(prev => [...prev, { type: "tool_call", content: evt.content, ts: Date.now() }]);
             } else if (evt.event_type === "tool_result") {
               setEvents(prev => [...prev, { type: "tool_result", content: evt.content, ts: Date.now() }]);
+              // Refresh files after write/edit
+              const tool = evt.content?.tool || "";
+              if (["write_file","edit_file"].includes(tool)) loadFiles(cwd);
             } else if (evt.event_type === "complete") {
               setEvents(prev => [...prev, { type: "complete", content: evt.content, ts: Date.now() }]);
             } else if (evt.event_type === "error") {
@@ -1029,9 +1049,7 @@ function OpenClawPage() {
         }
       }
     } catch (e: any) {
-      if (e.name !== "AbortError") {
-        setEvents(prev => [...prev, { type: "error", content: e.message, ts: Date.now() }]);
-      }
+      if (e.name !== "AbortError") setEvents(prev => [...prev, { type: "error", content: e.message, ts: Date.now() }]);
     } finally {
       setRunning(false);
     }
@@ -1044,148 +1062,269 @@ function OpenClawPage() {
   };
 
   const suggestions = [
-    "List all files in this project and explain the structure",
-    "Find all TODO comments in the codebase",
-    "Write a README for this project",
+    "List all files and explain the project structure",
+    "Find all TODO comments and list them",
     "Check git status and show recent commits",
-    "Find any syntax errors or obvious bugs",
+    "Write a README.md for this project",
+    "Find any obvious bugs or security issues",
+    "Add type hints to all Python functions",
   ];
 
+  const EXT_COLORS: Record<string, string> = {
+    py: "text-yellow-400", ts: "text-blue-400", tsx: "text-cyan-400",
+    js: "text-yellow-300", rs: "text-orange-400", go: "text-cyan-300",
+    json: "text-green-400", md: "text-purple-400", sh: "text-green-300",
+    css: "text-pink-400", html: "text-orange-300", sql: "text-blue-300",
+    toml: "text-red-300", yaml: "text-yellow-200", yml: "text-yellow-200",
+  };
+
+  const fileExt = (name: string) => name.split(".").pop() || "";
+  const fileColor = (name: string) => EXT_COLORS[fileExt(name)] || "text-neutral-400";
+  const fileIcon = (f: {name: string; is_dir: boolean}) => {
+    if (f.is_dir) return "📁";
+    const ext = fileExt(f.name);
+    const icons: Record<string, string> = {
+      py: "🐍", ts: "📘", tsx: "⚛️", js: "🟨", rs: "🦀", go: "🐹",
+      json: "📋", md: "📝", sh: "⚡", css: "🎨", html: "🌐",
+      sql: "🗃️", dockerfile: "🐳", lock: "🔒",
+    };
+    return icons[ext] || icons[f.name.toLowerCase()] || "📄";
+  };
+
+  const humanSize = (b: number) => b > 1024*1024 ? `${(b/1024/1024).toFixed(1)}M` : b > 1024 ? `${(b/1024).toFixed(0)}K` : `${b}B`;
+
   return (
-    <div className="flex flex-col h-full bg-black text-neutral-200 font-mono">
-      {/* Header */}
-      <div className="flex-shrink-0 px-4 py-3 border-b border-neutral-800 bg-neutral-950">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Terminal className="w-5 h-5 text-cyan-400" />
-            <span className="text-sm font-bold text-cyan-400">OpenClaw</span>
-            <span className="text-[10px] text-neutral-600 border border-neutral-800 px-1.5 py-0.5 rounded">local-first coding agent</span>
-          </div>
-          <div className="flex items-center gap-2">
-            {/* Model selector */}
-            <select value={model} onChange={e => setModel(e.target.value)}
-              className="bg-neutral-900 border border-neutral-800 text-xs text-neutral-300 rounded px-2 py-1 focus:outline-none focus:border-cyan-600">
-              {installed.length > 0
-                ? installed.map(m => <option key={m.name} value={m.name}>{m.name}{m.recommended ? " ⭐" : ""}</option>)
-                : <option value="qwen2.5-coder:7b">qwen2.5-coder:7b (not installed)</option>}
-            </select>
-            {/* CWD */}
-            <input value={cwd} onChange={e => setCwd(e.target.value)} placeholder="working dir"
-              className="bg-neutral-900 border border-neutral-800 text-xs text-neutral-500 rounded px-2 py-1 w-32 focus:outline-none focus:border-neutral-600" />
-          </div>
+    <div className="flex h-full bg-neutral-950 text-sm">
+      {/* LEFT — File Explorer */}
+      <div className="w-52 flex-shrink-0 border-r border-neutral-800 flex flex-col bg-[#0d0d0d]">
+        <div className="px-3 py-2 border-b border-neutral-800 flex items-center gap-2">
+          <span className="text-[10px] text-neutral-600 uppercase tracking-wider font-semibold">Explorer</span>
+          <button onClick={() => loadFiles(cwd)} className="ml-auto text-neutral-700 hover:text-neutral-400 transition-colors">
+            <RefreshCw className="w-3 h-3" />
+          </button>
+        </div>
+        {/* CWD breadcrumb */}
+        <div className="px-3 py-1.5 border-b border-neutral-900">
+          <input value={cwd} onChange={e => setCwd(e.target.value)} onBlur={() => loadFiles(cwd)}
+            className="w-full bg-transparent text-[10px] text-neutral-600 focus:outline-none focus:text-neutral-400 font-mono truncate" />
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {files.length === 0 ? (
+            <p className="text-[10px] text-neutral-700 px-3 py-4">No files found</p>
+          ) : files.map(f => (
+            <button key={f.path} onClick={() => f.is_dir ? (setCwd(f.path), loadFiles(f.path)) : openFileContent(f.path)}
+              className="w-full text-left flex items-center gap-1.5 px-3 py-1 hover:bg-neutral-800/60 transition-colors group">
+              <span className="text-sm flex-shrink-0">{fileIcon(f)}</span>
+              <span className={cx("text-[11px] truncate flex-1", f.is_dir ? "text-neutral-300" : fileColor(f.name))}>
+                {f.name}
+              </span>
+              {!f.is_dir && <span className="text-[9px] text-neutral-700 opacity-0 group-hover:opacity-100">{humanSize(f.size)}</span>}
+            </button>
+          ))}
+        </div>
+        {/* Parent dir button */}
+        <div className="border-t border-neutral-800 p-2">
+          <button onClick={() => { const p = cwd.split("/").slice(0,-1).join("/") || "/"; setCwd(p); loadFiles(p); }}
+            className="w-full text-[10px] text-neutral-700 hover:text-neutral-400 transition-colors text-left px-1">
+            ↑ parent directory
+          </button>
         </div>
       </div>
 
-      {/* Event stream */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-2">
-        {events.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full gap-6">
-            <div className="text-center">
-              <p className="text-4xl mb-3">🦅</p>
-              <p className="text-neutral-400 text-sm font-semibold">OpenClaw ready</p>
-              <p className="text-neutral-600 text-xs mt-1">Agentic coding powered by Ollama • {installed.length > 0 ? `${installed.length} models available` : "Pull a model to start"}</p>
+      {/* RIGHT — Main Panel */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Header */}
+        <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b border-neutral-800 bg-neutral-950">
+          <Terminal className="w-4 h-4 text-cyan-400 flex-shrink-0" />
+          <span className="text-xs font-bold text-cyan-400">OpenClaw</span>
+          <span className="text-[10px] text-neutral-600 border border-neutral-800 px-1.5 py-0.5 rounded">agentic coding agent</span>
+          <div className="ml-auto flex items-center gap-2">
+            {/* Tab switcher */}
+            {(["agent", "files", "editor"] as const).map(tab => (
+              <button key={tab} onClick={() => setActiveTab(tab)}
+                className={cx("text-[11px] px-2.5 py-1 rounded transition-colors capitalize",
+                  activeTab === tab ? "bg-neutral-800 text-white" : "text-neutral-600 hover:text-neutral-400")}>
+                {tab}{tab === "editor" && openFile ? `: ${openFile.path.split("/").pop()}` : ""}
+              </button>
+            ))}
+            <div className="w-px h-4 bg-neutral-800" />
+            <select value={model} onChange={e => setModel(e.target.value)}
+              className="bg-neutral-900 border border-neutral-800 text-[11px] text-neutral-400 rounded px-2 py-1 focus:outline-none">
+              {installed.length > 0
+                ? installed.map(m => <option key={m.name} value={m.name}>{m.name}{m.recommended ? " ⭐" : ""}</option>)
+                : <option>qwen2.5-coder:7b (not installed)</option>}
+            </select>
+          </div>
+        </div>
+
+        {/* Agent tab */}
+        {activeTab === "agent" && (
+          <div className="flex-1 flex flex-col min-h-0">
+            <div className="flex-1 overflow-y-auto p-4 space-y-2 font-mono">
+              {events.length === 0 && (
+                <div className="flex flex-col items-center justify-center h-full gap-5">
+                  <div className="text-center">
+                    <p className="text-5xl mb-3">🦅</p>
+                    <p className="text-neutral-300 font-semibold text-sm">OpenClaw ready</p>
+                    <p className="text-neutral-600 text-xs mt-1">
+                      {installed.length > 0
+                        ? `Using ${model} • ${installed.length} models available`
+                        : "Pull qwen2.5-coder:7b in Model Hub to start"}
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 w-full max-w-xl">
+                    {suggestions.map((s, i) => (
+                      <button key={i} onClick={() => setTask(s)}
+                        className="text-left px-3 py-2 rounded-lg border border-neutral-800 hover:border-cyan-700/50 hover:bg-neutral-900/80 transition-all text-[11px] text-neutral-600 hover:text-neutral-300">
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {events.map((evt, i) => (
+                <div key={i} className="min-w-0">
+                  {evt.type === "user" && (
+                    <div className="flex gap-2 py-2 border-b border-neutral-900 mb-2">
+                      <span className="text-cyan-600 flex-shrink-0 text-base">❯</span>
+                      <span className="text-neutral-200 text-xs leading-relaxed">{evt.content}</span>
+                    </div>
+                  )}
+                  {evt.type === "tool_call" && (
+                    <div className="flex items-center gap-2 text-[11px] py-0.5 text-neutral-700">
+                      <span>{TOOL_ICONS[evt.content?.tool] || "🔧"}</span>
+                      <span className="text-cyan-700">{evt.content?.tool}</span>
+                      <span className="truncate text-neutral-800">
+                        {Object.entries(evt.content?.args || {}).slice(0,2).map(([k,v]) =>
+                          `${k}=${JSON.stringify(v).slice(0,50)}`
+                        ).join("  ")}
+                      </span>
+                    </div>
+                  )}
+                  {evt.type === "tool_result" && (
+                    <div className="ml-5 mb-1">
+                      <div className="bg-[#0a0a0a] border border-neutral-900 rounded px-3 py-2 text-[10px] text-neutral-600 font-mono max-h-24 overflow-y-auto whitespace-pre-wrap">
+                        {String(evt.content?.result || "").slice(0, 800)}
+                      </div>
+                    </div>
+                  )}
+                  {evt.type === "stream" && (
+                    <div className="text-xs text-neutral-300 leading-relaxed whitespace-pre-wrap py-1">
+                      {evt.content}
+                      {running && i === events.length - 1 && (
+                        <span className="inline-block w-1.5 h-3 bg-cyan-400 ml-0.5 animate-pulse align-text-bottom" />
+                      )}
+                    </div>
+                  )}
+                  {evt.type === "complete" && (
+                    <div className="text-[10px] text-neutral-700 flex items-center gap-1 mt-1 pb-3 border-b border-neutral-900">
+                      <span className="text-green-600">✓</span> Done
+                    </div>
+                  )}
+                  {evt.type === "error" && (
+                    <div className="bg-red-950/30 border border-red-800/30 rounded px-3 py-2 text-[11px] text-red-400">
+                      {evt.content}
+                    </div>
+                  )}
+                </div>
+              ))}
+              <div ref={eventsEndRef} />
             </div>
-            {installed.length === 0 && (
-              <div className="bg-neutral-900 border border-amber-500/20 rounded-lg p-4 text-xs text-center max-w-sm">
-                <p className="text-amber-400 font-medium mb-2">No coding models installed</p>
-                <p className="text-neutral-500 mb-2">Go to Model Hub and pull:</p>
-                <code className="text-cyan-400">qwen2.5-coder:7b</code>
+
+            {/* Input */}
+            <div className="flex-shrink-0 border-t border-neutral-800 p-3 bg-[#0d0d0d]">
+              <div className="flex gap-2 items-end">
+                <textarea value={task} onChange={e => setTask(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); run(); } }}
+                  placeholder="Describe a coding task… (Enter to run, Shift+Enter for newline)"
+                  rows={2}
+                  className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-xs text-neutral-300 placeholder-neutral-700 focus:outline-none focus:border-cyan-700/50 resize-none font-mono"
+                />
+                {running ? (
+                  <button onClick={() => abortRef.current?.abort()}
+                    className="px-3 py-2 rounded-lg bg-red-900/30 border border-red-700/40 text-red-400 text-xs hover:bg-red-900/50 transition-colors flex-shrink-0">
+                    ✕ Stop
+                  </button>
+                ) : (
+                  <button onClick={run} disabled={!task.trim() || installed.length === 0}
+                    className="px-3 py-2 rounded-lg bg-cyan-900/30 border border-cyan-700/40 text-cyan-400 text-xs hover:bg-cyan-900/50 transition-colors disabled:opacity-30 flex-shrink-0">
+                    Run ⏎
+                  </button>
+                )}
               </div>
-            )}
-            <div className="grid grid-cols-1 gap-2 w-full max-w-lg">
-              {suggestions.map((s, i) => (
-                <button key={i} onClick={() => setTask(s)}
-                  className="text-left px-3 py-2 rounded-lg border border-neutral-800 hover:border-cyan-600/40 hover:bg-neutral-900 transition-all text-xs text-neutral-500 hover:text-neutral-300">
-                  {s}
+              {events.length > 0 && (
+                <div className="flex gap-3 mt-2">
+                  <button onClick={() => setEvents([])} className="text-[10px] text-neutral-700 hover:text-neutral-500 transition-colors">
+                    Clear history
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Files tab — shows files as cards */}
+        {activeTab === "files" && (
+          <div className="flex-1 overflow-y-auto p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <span className="text-xs text-neutral-500 font-mono">{cwd}</span>
+              <button onClick={() => loadFiles(cwd)} className="text-[10px] text-neutral-700 hover:text-neutral-400 transition-colors">
+                ↺ refresh
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {files.map(f => (
+                <button key={f.path} onClick={() => f.is_dir ? (setCwd(f.path)) : openFileContent(f.path)}
+                  className="text-left p-3 rounded-lg border border-neutral-800 hover:border-neutral-700 hover:bg-neutral-900/50 transition-all">
+                  <div className="text-xl mb-1">{fileIcon(f)}</div>
+                  <div className={cx("text-[11px] font-mono truncate", f.is_dir ? "text-neutral-300" : fileColor(f.name))}>
+                    {f.name}
+                  </div>
+                  {!f.is_dir && <div className="text-[9px] text-neutral-700 mt-0.5">{humanSize(f.size)}</div>}
                 </button>
               ))}
             </div>
           </div>
         )}
 
-        {events.map((evt, i) => (
-          <div key={i}>
-            {evt.type === "user" && (
-              <div className="flex gap-2 mb-4">
-                <span className="text-neutral-600 flex-shrink-0">❯</span>
-                <span className="text-neutral-200 text-sm">{evt.content}</span>
-              </div>
-            )}
-
-            {evt.type === "tool_call" && (
-              <div className="flex items-center gap-2 text-xs py-1">
-                <span className="text-neutral-600">{TOOL_ICONS[evt.content?.tool] || "🔧"}</span>
-                <span className="text-cyan-600">{evt.content?.tool}</span>
-                <span className="text-neutral-700 truncate">
-                  {Object.entries(evt.content?.args || {}).map(([k,v]) =>
-                    `${k}=${JSON.stringify(v).slice(0,40)}`
-                  ).join(" ")}
-                </span>
-              </div>
-            )}
-
-            {evt.type === "tool_result" && (
-              <div className="ml-5 mb-2">
-                <div className="bg-neutral-950 border border-neutral-800 rounded px-3 py-2 text-[11px] text-neutral-500 font-mono max-h-32 overflow-y-auto">
-                  {String(evt.content?.result || "").slice(0, 600)}
+        {/* Editor tab — read-only file viewer */}
+        {activeTab === "editor" && (
+          <div className="flex-1 flex flex-col min-h-0">
+            {openFile ? (
+              <>
+                <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b border-neutral-800 bg-[#0d0d0d]">
+                  <span className="text-[10px] text-neutral-600 font-mono truncate">{openFile.path}</span>
+                  <span className="ml-auto text-[10px] text-neutral-700">{openFile.lines} lines</span>
+                  <button onClick={() => { setTask(`Edit ${openFile.path}: `); setActiveTab("agent"); }}
+                    className="text-[10px] text-cyan-700 hover:text-cyan-500 transition-colors">
+                    Ask agent to edit →
+                  </button>
                 </div>
-              </div>
-            )}
-
-            {evt.type === "stream" && (
-              <div className="text-sm text-neutral-300 leading-relaxed whitespace-pre-wrap">
-                {evt.content}
-                {running && i === events.length - 1 && (
-                  <span className="inline-block w-1.5 h-3.5 bg-cyan-400 ml-0.5 animate-pulse" />
-                )}
-              </div>
-            )}
-
-            {evt.type === "complete" && (
-              <div className="mt-2 text-[10px] text-neutral-700 flex items-center gap-2">
-                <span className="text-green-500">✓</span> Task complete
-              </div>
-            )}
-
-            {evt.type === "error" && (
-              <div className="bg-red-900/20 border border-red-500/20 rounded px-3 py-2 text-xs text-red-400">
-                {evt.content}
+                <div className="flex-1 overflow-auto p-0">
+                  <pre className="text-[11px] font-mono text-neutral-400 leading-5 p-4 min-w-max">
+                    {openFile.content.split("\n").map((line, i) => (
+                      <div key={i} className="flex">
+                        <span className="w-10 flex-shrink-0 text-right pr-3 text-neutral-700 select-none">{i + 1}</span>
+                        <span className="flex-1">{line}</span>
+                      </div>
+                    ))}
+                  </pre>
+                </div>
+              </>
+            ) : (
+              <div className="flex-1 flex items-center justify-center text-neutral-700 text-sm">
+                Click a file in the explorer to view it
               </div>
             )}
           </div>
-        ))}
-        <div ref={eventsEndRef} />
-      </div>
-
-      {/* Input */}
-      <div className="flex-shrink-0 p-3 border-t border-neutral-800 bg-neutral-950">
-        <div className="flex gap-2 items-end">
-          <div className="flex-1 relative">
-            <textarea
-              value={task}
-              onChange={e => setTask(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); run(); } }}
-              placeholder="Describe a coding task... (Enter to run, Shift+Enter for newline)"
-              rows={2}
-              className="w-full bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm text-neutral-300 placeholder-neutral-700 focus:outline-none focus:border-cyan-600/50 resize-none font-mono"
-            />
-          </div>
-          {running ? (
-            <button onClick={() => abortRef.current?.abort()}
-              className="flex-shrink-0 px-4 py-2.5 rounded-lg bg-red-500/20 border border-red-500/40 text-red-400 text-xs hover:bg-red-500/30 transition-colors">
-              Stop
-            </button>
-          ) : (
-            <button onClick={run} disabled={!task.trim()}
-              className="flex-shrink-0 px-4 py-2.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-400 text-xs hover:bg-cyan-500/30 transition-colors disabled:opacity-30">
-              Run ⏎
-            </button>
-          )}
-        </div>
+        )}
       </div>
     </div>
   );
 }
+
+
 
 function SettingsPage({ stats }: { stats: any }) {
   const [model, setModel] = useState(""); const [local, setLocal] = useState(false);
