@@ -1436,39 +1436,98 @@ function SettingsPage({ stats }: { stats: any }) {
           ))}
         </div>
 
-        {/* Ollama config */}
+        {/* Ollama hosts */}
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5">
           <div className="flex items-center gap-3 mb-4">
             <span className="text-2xl">🦙</span>
             <div>
-              <h2 className="text-sm font-semibold text-white">Ollama (Local Models)</h2>
-              <p className="text-xs text-neutral-500">Free, private, runs on your machine</p>
+              <h2 className="text-sm font-semibold text-white">Ollama</h2>
+              <p className="text-xs text-neutral-500">Local or remote — supports API key authentication</p>
             </div>
             <div className={cx("ml-auto flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border",
               ollamaStatus?.available
                 ? "text-green-400 border-green-500/30 bg-green-500/10"
-                : "text-neutral-500 border-neutral-700 bg-neutral-800")}>
-              <div className={cx("w-1.5 h-1.5 rounded-full", ollamaStatus?.available ? "bg-green-400" : "bg-neutral-600")} />
-              {ollamaStatus?.available ? `${ollamaStatus.models?.length || 0} models` : "Offline"}
+                : "text-amber-500 border-amber-500/30 bg-amber-500/10")}>
+              <div className={cx("w-1.5 h-1.5 rounded-full", ollamaStatus?.available ? "bg-green-400" : "bg-amber-500")} />
+              {ollamaStatus?.available ? `${ollamaStatus.model_count || 0} models · ${ollamaStatus.latency_ms}ms` : "Offline"}
             </div>
           </div>
-          <div className="flex gap-2">
-            <input value={ollamaUrl} onChange={e => setOllamaUrl(e.target.value)}
-              placeholder="http://localhost:11434"
-              className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 focus:outline-none focus:border-cyan-600 font-mono" />
-            <button onClick={saveOllama}
-              className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm rounded-lg transition-colors">
-              Save
-            </button>
+
+          {/* Add / update host form */}
+          <div className="space-y-2 mb-4">
+            <div className="flex gap-2">
+              <input value={ollamaUrl} onChange={e => setOllamaUrl(e.target.value)}
+                placeholder="http://localhost:11434  or  https://your-server.com:11434"
+                className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-600 focus:outline-none focus:border-cyan-600 font-mono" />
+            </div>
+            <div className="flex gap-2">
+              <input
+                id="ollama-key-input"
+                type="password"
+                placeholder="API key (optional — only needed for secured/remote Ollama)"
+                className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-600 focus:outline-none focus:border-cyan-600 font-mono"
+              />
+              <button onClick={async () => {
+                  const keyInput = document.getElementById("ollama-key-input") as HTMLInputElement;
+                  const apiKey = keyInput?.value || "";
+                  try {
+                    const r = await apiFetch(`/settings/ollama?url=${encodeURIComponent(ollamaUrl)}&api_key=${encodeURIComponent(apiKey)}`, { method: "POST" });
+                    await load();
+                    if (r.available) toast.success(`Connected — ${r.model_count} models`);
+                    else toast.error(r.error || "Could not connect");
+                    if (keyInput) keyInput.value = "";
+                  } catch {}
+                }}
+                className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm rounded-lg transition-colors whitespace-nowrap">
+                Add / Update
+              </button>
+            </div>
+            <p className="text-[10px] text-neutral-700">
+              For remote servers, set <code className="text-neutral-600">OLLAMA_HOST=0.0.0.0</code> on the server. Use API key if you secured it with a reverse proxy.
+            </p>
           </div>
+
+          {/* Host list */}
+          {ollamaStatus?.all_hosts && ollamaStatus.all_hosts.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-[10px] text-neutral-600 uppercase tracking-wider">Configured hosts</p>
+              {ollamaStatus.all_hosts.map((h: any, i: number) => (
+                <div key={h.url} className="flex items-center gap-3 bg-neutral-800/60 rounded-lg px-3 py-2">
+                  {i === 0 && <span className="text-[10px] text-cyan-500 border border-cyan-500/30 px-1.5 py-0.5 rounded">primary</span>}
+                  <span className="font-mono text-xs text-neutral-400 flex-1 truncate">{h.url}</span>
+                  {h.api_key && <span className="text-[10px] text-neutral-600">🔑 key set</span>}
+                  <button onClick={async () => {
+                      await apiFetch(`/ollama/hosts/${encodeURIComponent(h.url)}/set-primary`, { method: "POST" });
+                      await load();
+                    }}
+                    className="text-[10px] text-neutral-600 hover:text-cyan-500 transition-colors">
+                    set primary
+                  </button>
+                  <button onClick={async () => {
+                      await apiFetch(`/ollama/hosts/${encodeURIComponent(h.url)}`, { method: "DELETE" });
+                      await load();
+                    }}
+                    className="text-[10px] text-neutral-600 hover:text-red-400 transition-colors">
+                    remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Models on primary */}
           {ollamaStatus?.available && ollamaStatus.models?.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-1.5">
-              {ollamaStatus.models.slice(0, 8).map((m: any) => (
+              {ollamaStatus.models.slice(0, 10).map((m: any) => (
                 <span key={m.name} className="text-[10px] bg-neutral-800 text-neutral-400 px-2 py-0.5 rounded-full border border-neutral-700">
                   {m.name}
                 </span>
               ))}
             </div>
+          )}
+
+          {ollamaStatus?.error && (
+            <p className="mt-2 text-xs text-amber-600">{ollamaStatus.error}</p>
           )}
         </div>
 

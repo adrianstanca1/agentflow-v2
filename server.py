@@ -35,8 +35,57 @@ FRONTEND_DIST = HERE / "frontend" / "dist"
 from dotenv import load_dotenv
 load_dotenv(HERE / ".env")
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 ENV_FILE   = HERE / ".env"
+
+# ── Ollama host registry — supports multiple hosts, persisted in .env ──────────
+_DEFAULT_OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+_DEFAULT_OLLAMA_KEY = os.getenv("OLLAMA_API_KEY", "")  # optional bearer token
+
+def _load_ollama_hosts() -> List[Dict]:
+    """Load Ollama host list from .env (JSON-encoded OLLAMA_HOSTS)."""
+    load_dotenv(ENV_FILE, override=True)
+    raw = os.getenv("OLLAMA_HOSTS", "")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    # Fall back to single legacy URL
+    url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    key = os.getenv("OLLAMA_API_KEY", "")
+    return [{"url": url, "name": "Default", "api_key": key, "enabled": True}]
+
+def _save_ollama_hosts(hosts: List[Dict]):
+    _write_env({"OLLAMA_HOSTS": json.dumps(hosts)})
+
+def _get_primary_host() -> Dict:
+    hosts = _load_ollama_hosts()
+    enabled = [h for h in hosts if h.get("enabled", True)]
+    return enabled[0] if enabled else {"url": "http://localhost:11434", "api_key": ""}
+
+# Primary URL for backward compat
+@property
+def OLLAMA_URL_prop(self): return _get_primary_host()["url"]
+OLLAMA_URL = _get_primary_host()["url"]  # snapshot at startup; use _get_primary_host() dynamically
+
+def _ollama_headers(host: Dict = None) -> Dict:
+    h = host or _get_primary_host()
+    key = h.get("api_key", "")
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+async def _check_ollama_host(url: str, api_key: str = "") -> Dict:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        start = time.time()
+        async with httpx.AsyncClient(timeout=4.0) as c:
+            r = await c.get(f"{url}/api/tags", headers=headers)
+            latency = round((time.time()-start)*1000, 1)
+            if r.status_code == 200:
+                models = r.json().get("models", [])
+                return {"healthy": True, "latency_ms": latency, "model_count": len(models), "models": models}
+            return {"healthy": False, "latency_ms": latency, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        return {"healthy": False, "latency_ms": 0, "error": str(e)[:80]}
 
 # ── Dynamic key store — reads from .env, can be updated at runtime ─────────────
 _KEY_NAMES = {
@@ -92,38 +141,41 @@ def _write_env(updates: Dict[str, str]):
     load_dotenv(ENV_FILE, override=True)
 
 # ── Ollama helpers ─────────────────────────────────────────────────────────────
-async def ollama_available() -> bool:
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as c:
-            r = await c.get(f"{OLLAMA_URL}/api/tags")
-            return r.status_code == 200
-    except Exception:
-        return False
+async def ollama_available(host: Dict = None) -> bool:
+    h = host or _get_primary_host()
+    result = await _check_ollama_host(h["url"], h.get("api_key",""))
+    return result["healthy"]
 
-async def ollama_models() -> List[Dict]:
+async def ollama_models(host: Dict = None) -> List[Dict]:
+    h = host or _get_primary_host()
+    headers = _ollama_headers(h)
     try:
         async with httpx.AsyncClient(timeout=4.0) as c:
-            r = await c.get(f"{OLLAMA_URL}/api/tags")
+            r = await c.get(f"{h['url']}/api/tags", headers=headers)
             if r.status_code == 200:
                 return r.json().get("models", [])
     except Exception:
         pass
     return []
 
-async def ollama_running() -> List[Dict]:
+async def ollama_running(host: Dict = None) -> List[Dict]:
+    h = host or _get_primary_host()
+    headers = _ollama_headers(h)
     try:
         async with httpx.AsyncClient(timeout=4.0) as c:
-            r = await c.get(f"{OLLAMA_URL}/api/ps")
+            r = await c.get(f"{h['url']}/api/ps", headers=headers)
             if r.status_code == 200:
                 return r.json().get("models", [])
     except Exception:
         pass
     return []
 
-async def ollama_pull_stream(model_name: str) -> AsyncGenerator[Dict, None]:
+async def ollama_pull_stream(model_name: str, host: Dict = None) -> AsyncGenerator[Dict, None]:
+    h = host or _get_primary_host()
+    headers = _ollama_headers(h)
     async with httpx.AsyncClient(timeout=None) as c:
-        async with c.stream("POST", f"{OLLAMA_URL}/api/pull",
-                            json={"name": model_name, "stream": True}) as resp:
+        async with c.stream("POST", f"{h['url']}/api/pull",
+                            headers=headers, json={"name": model_name, "stream": True}) as resp:
             async for line in resp.aiter_lines():
                 if not line.strip():
                     continue
@@ -219,8 +271,10 @@ def _build_llm(model: str, temperature: float = 0.7, tools: list = None):
     provider = _detect_provider(model)
 
     if provider == "ollama":
+        h = _get_primary_host()
+        ollama_key = h.get("api_key","") or "ollama"
         llm = ChatOpenAI(model=model.replace("ollama/",""), temperature=temperature,
-                         base_url=f"{OLLAMA_URL}/v1", api_key="ollama")
+                         base_url=f"{h['url']}/v1", api_key=ollama_key)
     elif provider == "anthropic" and keys.get("anthropic"):
         try:
             from langchain_anthropic import ChatAnthropic
@@ -249,8 +303,9 @@ def _build_llm(model: str, temperature: float = 0.7, tools: list = None):
                          base_url="https://openrouter.ai/api/v1", api_key=keys["openrouter"])
     else:
         # Fallback to Ollama
+        h = _get_primary_host()
         llm = ChatOpenAI(model=model, temperature=temperature,
-                         base_url=f"{OLLAMA_URL}/v1", api_key="ollama")
+                         base_url=f"{h['url']}/v1", api_key=h.get("api_key","") or "ollama")
     return llm.bind_tools(tools) if tools else llm
 
 async def _run_agent_stream(model: str, task: str, agent_key: str, session_id: str) -> AsyncGenerator[str, None]:
@@ -401,30 +456,78 @@ async def switch_model(req: SwitchModelReq):
 # ── Ollama ─────────────────────────────────────────────────────────────────────
 @app.get("/ollama/hosts")
 async def ollama_hosts():
-    online = await ollama_available()
-    models = await ollama_models()
-    return {"hosts": [{"url": OLLAMA_URL, "name": "Local", "type": "local", "is_healthy": online,
-                       "latency_ms": 0, "model_count": len(models), "gpu_count": 0}],
-            "total_hosts": 1, "healthy_hosts": 1 if online else 0,
-            "total_models": len(models)}
+    hosts = _load_ollama_hosts()
+    result = []
+    total_models = 0
+    healthy = 0
+    for h in hosts:
+        check = await _check_ollama_host(h["url"], h.get("api_key",""))
+        total_models += check.get("model_count", 0)
+        if check["healthy"]: healthy += 1
+        result.append({
+            "url": h["url"], "name": h.get("name","Ollama"),
+            "api_key": ("*" * 8) if h.get("api_key") else "",
+            "has_key": bool(h.get("api_key")),
+            "enabled": h.get("enabled", True),
+            "is_healthy": check["healthy"],
+            "latency_ms": check.get("latency_ms", 0),
+            "model_count": check.get("model_count", 0),
+            "error": check.get("error"),
+        })
+    return {"hosts": result, "total_hosts": len(result),
+            "healthy_hosts": healthy, "total_models": total_models}
 
 @app.post("/ollama/hosts")
 async def add_ollama_host(req: AddHostReq):
-    try:
-        async with httpx.AsyncClient(timeout=3) as c:
-            r = await c.get(f"{req.url}/api/tags")
-            healthy = r.status_code == 200
-    except Exception:
-        healthy = False
-    return {"url": req.url, "healthy": healthy, "models": 0}
+    hosts = _load_ollama_hosts()
+    # Avoid duplicates
+    if any(h["url"] == req.url for h in hosts):
+        raise HTTPException(400, f"Host {req.url} already exists")
+    check = await _check_ollama_host(req.url, req.api_key or "")
+    new_host = {"url": req.url, "name": req.name or req.url,
+                "api_key": req.api_key or "", "enabled": True}
+    hosts.append(new_host)
+    _save_ollama_hosts(hosts)
+    return {"url": req.url, "name": new_host["name"],
+            "healthy": check["healthy"], "model_count": check.get("model_count",0),
+            "error": check.get("error")}
 
 @app.delete("/ollama/hosts/{host_url:path}")
 async def remove_host(host_url: str):
+    hosts = _load_ollama_hosts()
+    original = len(hosts)
+    hosts = [h for h in hosts if h["url"] != host_url]
+    if len(hosts) < original:
+        _save_ollama_hosts(hosts)
     return {"removed": host_url}
+
+@app.put("/ollama/hosts/{host_url:path}")
+async def update_host(host_url: str, req: AddHostReq):
+    hosts = _load_ollama_hosts()
+    for h in hosts:
+        if h["url"] == host_url:
+            if req.name: h["name"] = req.name
+            if req.api_key is not None: h["api_key"] = req.api_key
+            break
+    else:
+        raise HTTPException(404, "Host not found")
+    _save_ollama_hosts(hosts)
+    return {"updated": host_url}
 
 @app.post("/ollama/hosts/{host_url:path}/check")
 async def check_host(host_url: str):
-    return {"url": host_url, "healthy": await ollama_available(), "latency_ms": 0, "models": 0}
+    hosts = _load_ollama_hosts()
+    host = next((h for h in hosts if h["url"] == host_url), {"url": host_url, "api_key": ""})
+    result = await _check_ollama_host(host["url"], host.get("api_key",""))
+    return {"url": host_url, **result}
+
+@app.post("/ollama/hosts/{host_url:path}/set-primary")
+async def set_primary_host(host_url: str):
+    hosts = _load_ollama_hosts()
+    # Move the selected host to front
+    hosts = sorted(hosts, key=lambda h: 0 if h["url"]==host_url else 1)
+    _save_ollama_hosts(hosts)
+    return {"primary": host_url}
 
 @app.get("/ollama/models")
 async def list_ollama_models(host_url: Optional[str] = Query(None)):
@@ -575,11 +678,12 @@ async def test_cloud_model(model: str = Query(...), prompt: str = Query("Say hi 
 @app.get("/models/all")
 async def all_models():
     configured = set(k for k, v in _get_key_map().items() if v)
-    raw = await ollama_models()
+    primary = _get_primary_host()
+    raw = await ollama_models(primary)
     local = [{"id": m.get("name",""), "name": m.get("name",""), "source": "ollama", "provider": "ollama",
               "provider_name": "Ollama", "provider_icon": "🦙", "provider_color": "from-green-500 to-teal-500",
               "size": _human_size(m.get("size",0)), "family": m.get("details",{}).get("family",""),
-              "host_url": OLLAMA_URL, "category": "local", "configured": True, "cost_label": "Free (local)"} for m in raw]
+              "host_url": primary["url"], "category": "local", "configured": True, "cost_label": "Free (local)"} for m in raw]
     cloud = [{**m, "configured": m["provider"] in configured,
               "cost_label": f"${m['input_cost']:.2f}/${m['output_cost']:.2f}/1M" if m.get("input_cost",0) > 0 else "Free"
               } for m in CLOUD_CATALOG]
@@ -819,25 +923,34 @@ async def test_api_key(provider_id: str):
 
 @app.get("/settings/ollama")
 async def get_ollama_settings():
-    return {"url": OLLAMA_URL, "available": await ollama_available(),
-            "models": await ollama_models()}
+    primary = _get_primary_host()
+    check = await _check_ollama_host(primary["url"], primary.get("api_key",""))
+    return {
+        "url": primary["url"],
+        "has_key": bool(primary.get("api_key","")),
+        "available": check["healthy"],
+        "latency_ms": check.get("latency_ms", 0),
+        "models": check.get("models", []),
+        "model_count": check.get("model_count", 0),
+        "error": check.get("error"),
+        "all_hosts": _load_ollama_hosts(),
+    }
 
 @app.post("/settings/ollama")
-async def save_ollama_settings(url: str = Query(...)):
-    """Update Ollama URL (writes to .env)."""
-    _write_env({"OLLAMA_URL": url})
-    # Update in-process too
-    import os as _os
-    _os.environ["OLLAMA_URL"] = url
-    global OLLAMA_URL
-    OLLAMA_URL = url
-    try:
-        async with httpx.AsyncClient(timeout=3) as c:
-            r = await c.get(f"{url}/api/tags")
-            available = r.status_code == 200
-    except Exception:
-        available = False
-    return {"saved": True, "url": url, "available": available}
+async def save_ollama_settings(url: str = Query(...), api_key: str = Query("")):
+    """Add or update primary Ollama host with optional API key."""
+    hosts = _load_ollama_hosts()
+    # Update existing or insert at front
+    existing = next((h for h in hosts if h["url"]==url), None)
+    if existing:
+        if api_key: existing["api_key"] = api_key
+        existing["enabled"] = True
+    else:
+        hosts.insert(0, {"url": url, "name": "Ollama", "api_key": api_key, "enabled": True})
+    _save_ollama_hosts(hosts)
+    check = await _check_ollama_host(url, api_key)
+    return {"saved": True, "url": url, "available": check["healthy"],
+            "model_count": check.get("model_count",0), "error": check.get("error")}
 
 # ════════════════════════════════════════════════════════════
 # OPENCLAW ENDPOINTS
