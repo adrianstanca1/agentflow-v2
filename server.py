@@ -953,76 +953,86 @@ async def save_ollama_settings(url: str = Query(...), api_key: str = Query("")):
             "model_count": check.get("model_count",0), "error": check.get("error")}
 
 # ════════════════════════════════════════════════════════════
-# OPENCLAW ENDPOINTS
+# OPENCLAW ENDPOINTS — unified provider routing
 # ════════════════════════════════════════════════════════════
+
+import sys as _sys
+_sys.path.insert(0, str(HERE / "openclaw"))
 
 class OpenClawRunReq(BaseModel):
     task: str
     model: Optional[str] = None
+    provider: Optional[str] = None   # groq | openai | anthropic | ollama | together | mistral | gemini | openrouter
     cwd: str = "."
     session_id: Optional[str] = None
     stream: bool = True
 
-# In-memory sessions (prod would use Redis)
+# In-memory sessions
 _openclaw_sessions: Dict[str, Any] = {}
+
+def _oc_import():
+    """Import OpenClaw core (deferred so missing openai SDK doesn't break startup)."""
+    from openclaw.core import (
+        AgentSession, PROVIDERS, detect_provider, detect_model,
+        _get_provider_config, list_provider_models, check_provider,
+    )
+    return AgentSession, PROVIDERS, detect_provider, detect_model, _get_provider_config, list_provider_models, check_provider
+
 
 @app.post("/openclaw/run")
 async def openclaw_run(req: OpenClawRunReq):
-    """Run an OpenClaw agentic coding task with streaming SSE."""
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "openclaw"))
-    
+    """Stream an OpenClaw agentic coding task using any configured provider."""
     try:
-        from openclaw.core import AgentSession, list_models as oc_list_models
-        from openclaw.config import detect_best_model
-    except ImportError:
+        AgentSession, PROVIDERS, detect_provider, detect_model, _get_provider_config, _, _ = _oc_import()
+    except ImportError as e:
         async def err():
-            msg = json.dumps({"event_type":"error","content":"OpenClaw not installed. Run: pip install -e openclaw/"})
-            yield f"data: {msg}\n\n"
+            yield f"data: {json.dumps({'event_type':'error','content':f'OpenClaw import error: {e}. Run: pip install openai'})}\n\n"
         return EventSourceResponse(err())
 
     sid = req.session_id or str(uuid.uuid4())
-    
-    # Resolve model
-    model = req.model
-    if not model:
-        available = await oc_list_models(OLLAMA_URL)
-        model = detect_best_model(available) or "qwen2.5-coder:7b"
-    
-    # Get or create session
+    cwd = str(Path(req.cwd).resolve()) if req.cwd not in (".", "") else str(Path.cwd())
+
+    # Resolve provider — UI selection > env auto-detect
+    provider = req.provider or detect_provider()
+    if provider not in PROVIDERS:
+        provider = detect_provider()
+
+    # Resolve model — UI selection > provider default
+    keys = _get_key_map()
+    model = req.model or detect_model(provider)
+
+    # Get or create session (keyed by sid)
     if sid not in _openclaw_sessions:
-        cwd = str(Path(req.cwd).resolve()) if req.cwd != "." else os.getcwd()
-        _openclaw_sessions[sid] = AgentSession(model=model, cwd=cwd)
-    
-    session: AgentSession = _openclaw_sessions[sid]
+        _openclaw_sessions[sid] = AgentSession(model=model, provider=provider, cwd=cwd)
+    session = _openclaw_sessions[sid]
+    # Allow hot-swapping model/provider mid-session
     session.model = model
+    session.provider = provider
 
     async def stream_run():
         queue: asyncio.Queue = asyncio.Queue()
 
-        def on_token(token: str):
-            queue.put_nowait({"event_type": "stream_token", "content": token, "session_id": sid})
+        def on_token(tok: str):
+            queue.put_nowait({"event_type":"stream_token","content":tok,"session_id":sid})
 
         def on_tool(name: str, args: dict, result):
             if result is None:
-                queue.put_nowait({"event_type": "tool_call", "content": {"tool": name, "args": args}, "session_id": sid})
+                queue.put_nowait({"event_type":"tool_call","content":{"tool":name,"args":args},"session_id":sid})
             else:
-                queue.put_nowait({"event_type": "tool_result", "content": {"tool": name, "result": result[:500]}, "session_id": sid})
+                queue.put_nowait({"event_type":"tool_result","content":{"tool":name,"result":str(result)[:800]},"session_id":sid})
 
         async def runner():
             try:
                 result = await session.run(req.task, on_token=on_token, on_tool=on_tool)
-                queue.put_nowait({"event_type": "complete", "content": result, "session_id": sid})
+                queue.put_nowait({"event_type":"complete","content":result,"session_id":sid})
             except Exception as e:
-                queue.put_nowait({"event_type": "error", "content": str(e), "session_id": sid})
-            queue.put_nowait(None)  # sentinel
+                queue.put_nowait({"event_type":"error","content":str(e),"session_id":sid})
+            queue.put_nowait(None)
 
         asyncio.create_task(runner())
-
         while True:
             item = await queue.get()
-            if item is None:
-                break
+            if item is None: break
             yield f"data: {json.dumps(item)}\n\n"
 
     return EventSourceResponse(stream_run())
@@ -1030,7 +1040,8 @@ async def openclaw_run(req: OpenClawRunReq):
 
 @app.get("/openclaw/sessions")
 async def list_openclaw_sessions():
-    return [{"session_id": sid, "model": s.model, "cwd": s.cwd, "turns": len(s.messages)//2}
+    return [{"session_id": sid, "provider": s.provider, "model": s.model,
+             "cwd": s.cwd, "turns": len([m for m in s.messages if m["role"]=="user"])}
             for sid, s in _openclaw_sessions.items()]
 
 
@@ -1041,25 +1052,61 @@ async def clear_openclaw_session(session_id: str):
     return {"cleared": session_id}
 
 
-@app.get("/openclaw/models")
-async def openclaw_models():
-    """Models suitable for coding tasks."""
-    available = await ollama_models()
-    available_names = {m.get("name","") for m in available}
-    coding_priority = [
-        "qwen2.5-coder:32b","deepseek-coder-v2:16b","qwen2.5-coder:14b",
-        "deepseek-r1:14b","qwen2.5-coder:7b","deepseek-r1:8b","codestral:22b",
-        "llama3.3:70b","llama3.1:8b","phi4:latest","mistral:7b","llama3.2:latest",
-    ]
+@app.get("/openclaw/providers")
+async def openclaw_providers():
+    """All providers with configured status — used by the OpenClaw page model selector."""
+    try:
+        _, PROVIDERS, _, _, _get_provider_config, _, _ = _oc_import()
+    except ImportError:
+        return []
+    keys = _get_key_map()
     result = []
-    for m in coding_priority:
-        result.append({"name": m, "installed": m in available_names,
-                        "recommended": m in {"qwen2.5-coder:7b","qwen2.5-coder:14b","deepseek-r1:8b"}})
-    # Add any other installed models not in priority list
-    for m in available_names:
-        if not any(r["name"] == m for r in result):
-            result.append({"name": m, "installed": True, "recommended": False})
+    for pid, cfg in PROVIDERS.items():
+        key_env = cfg.get("api_key_env","")
+        if pid == "ollama":
+            host = _get_primary_host()
+            configured = True  # always listed; health determined separately
+            url = host["url"]
+        else:
+            configured = bool(keys.get(pid,""))
+            url = cfg.get("base_url","")
+        result.append({
+            "id": pid,
+            "name": cfg["name"],
+            "icon": cfg["icon"],
+            "configured": configured,
+            "free": cfg.get("free", False),
+            "default_model": cfg.get("default_model",""),
+            "url": url,
+        })
     return result
+
+
+@app.get("/openclaw/models")
+async def openclaw_models(provider: Optional[str] = Query(None)):
+    """Models for a provider — used to populate the model dropdown."""
+    try:
+        _, PROVIDERS, dp, _, _get_provider_config, list_provider_models, _ = _oc_import()
+    except ImportError:
+        return []
+    p = provider or dp()
+    models = await list_provider_models(p)
+    # For Ollama, only return installed models
+    if p == "ollama":
+        installed = {m.get("name","") for m in await ollama_models()}
+        return [{"name": m, "installed": True, "provider": p} for m in installed] or                [{"name": cfg, "installed": False, "provider": p} for cfg in [
+                   "qwen2.5-coder:7b","llama3.2:latest","deepseek-r1:8b"]]
+    return [{"name": m, "installed": True, "provider": p} for m in models]
+
+
+@app.post("/openclaw/providers/{provider_id}/check")
+async def check_openclaw_provider(provider_id: str):
+    """Test a provider connection from the OpenClaw page."""
+    try:
+        _, _, _, _, _, _, check_provider = _oc_import()
+        return await check_provider(provider_id)
+    except ImportError as e:
+        return {"ok": False, "error": str(e), "provider": provider_id}
 
 
 # ── OpenClaw PTY WebSocket Terminal ───────────────────────────────────────────

@@ -1,6 +1,10 @@
 """
-OpenClaw — CLI Entry Point
-Interactive REPL: model switching, file context, history, slash commands.
+OpenClaw CLI — agentic coding agent for any provider.
+Usage:
+  openclaw                              # auto-detect provider, interactive
+  openclaw -p groq -m llama-3.3-70b    # specify provider + model
+  openclaw "fix the bug in auth.py"    # one-shot task
+  openclaw --list-providers            # show configured providers
 """
 from __future__ import annotations
 
@@ -9,317 +13,255 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional
 
-from .config import OpenClawConfig, detect_best_model, get_recommended_models
-from .core import AgentSession, list_models, ollama_available, pull_model
-from .tui import make_ui
+# Make sure the package is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from openclaw.core import (
+    PROVIDERS, AgentSession, check_provider, detect_model,
+    detect_provider, list_provider_models, _get_provider_config,
+)
+from openclaw.tui import RichUI, PlainUI
 
 
-# ── Command history ────────────────────────────────────────────────────────────
-try:
+def _get_ui(plain: bool = False):
+    if plain:
+        return PlainUI()
+    try:
+        return RichUI()
+    except Exception:
+        return PlainUI()
+
+
+async def cmd_list_providers(ui):
+    ui.print_header()
+    ui.info("Configured providers:\n")
+    for pid, cfg in PROVIDERS.items():
+        key_env = cfg.get("api_key_env", "")
+        key = os.getenv(key_env, "") if key_env else "n/a"
+        if pid == "ollama":
+            url = os.getenv(cfg.get("base_url_env","OLLAMA_URL"), cfg.get("base_url_default",""))
+            status = f"URL: {url}"
+            configured = True  # always available if Ollama runs
+        else:
+            configured = bool(key)
+            status = f"{'✓ key set' if configured else '✗ no key'}"
+        icon = cfg["icon"]
+        name = cfg["name"]
+        default = cfg.get("default_model","")
+        line = f"  {icon} {name:15} {status:25} default: {default}"
+        if configured:
+            ui.success(line)
+        else:
+            ui.dim(line)
+    ui.info("\nSet keys in .env or via Settings in the web UI.")
+
+
+async def cmd_check_provider(provider: str, ui):
+    ui.info(f"Checking {PROVIDERS[provider]['name']}...")
+    result = await check_provider(provider)
+    if result["ok"]:
+        ui.success(f"✓ Connected — {result.get('model_count',0)} models — {result.get('latency_ms',0)}ms")
+    else:
+        ui.error(f"✗ Failed: {result['error']}")
+
+
+async def interactive_loop(session: AgentSession, ui):
+    """REPL loop — reads tasks, runs agent, prints output."""
     import readline
 
-    def setup_readline(history_file: str, max_history: int):
-        readline.set_history_length(max_history)
-        try:
-            readline.read_history_file(history_file)
-        except FileNotFoundError:
-            pass
+    history_file = Path.home() / ".openclaw_history"
+    try:
+        readline.read_history_file(str(history_file))
+    except FileNotFoundError:
+        pass
 
-    def save_history(history_file: str):
-        try:
-            readline.write_history_file(history_file)
-        except Exception:
-            pass
-except ImportError:
-    def setup_readline(history_file, max_history): pass
-    def save_history(history_file): pass
+    cfg = _get_provider_config(session.provider)
+    ui.print_header(provider=cfg["name"], model=session.model, cwd=session.cwd)
 
+    def _on_token(tok: str):
+        ui.stream_token(tok)
 
-# ── Main REPL ─────────────────────────────────────────────────────────────────
-async def run_repl(
-    cwd: str,
-    model: str,
-    cfg: OpenClawConfig,
-    initial_task: Optional[str] = None,
-):
-    ui = make_ui(cwd, model)
-
-    if cfg.show_banner:
-        ui.print_banner()
-
-    session = AgentSession(model=model, cwd=cwd, max_iterations=cfg.max_iterations)
-    setup_readline(cfg.history_file, cfg.max_history)
-
-    last_cmd = ""
-    streaming_active = False
-
-    def on_token(token: str):
-        nonlocal streaming_active
-        if not streaming_active:
-            ui.streaming_start()
-            streaming_active = True
-        ui.streaming_token(token)
-
-    def on_tool(name: str, args: dict, result):
-        ui.print_tool(name, args, result)
-
-    async def handle_command(cmd: str) -> bool:
-        """Handle slash commands. Returns True to continue, False to exit."""
-        nonlocal model, cwd, streaming_active
-
-        parts = cmd.split(maxsplit=1)
-        command = parts[0].lower()
-        arg = parts[1].strip() if len(parts) > 1 else ""
-
-        if command in ("/exit", "/quit", "/q"):
-            ui.print_info("Bye! 👋")
-            return False
-
-        elif command == "/help":
-            ui.print_help()
-
-        elif command == "/clear":
-            session.reset()
-            ui.print_info("Conversation history cleared.")
-
-        elif command == "/models":
-            available = await list_models(cfg.ollama_url)
-            if not available:
-                ui.print_error("No models found. Is Ollama running?")
-            else:
-                if hasattr(ui, "print_models_table"):
-                    ui.print_models_table(available, model)
-                else:
-                    for m in available:
-                        mark = " ◀ active" if m == model else ""
-                        ui.print_info(f"  {m}{mark}")
-
-        elif command == "/model":
-            if not arg:
-                ui.print_info(f"Current model: {model}")
-                return True
-            available = await list_models(cfg.ollama_url)
-            if arg not in available:
-                # Check if it's in recommended and offer to pull
-                recommended = get_recommended_models()
-                if arg in recommended:
-                    ui.print_info(f"Model '{arg}' not installed. Pulling...")
-                    async for progress in pull_model(arg, cfg.ollama_url):
-                        status = progress.get("status", "")
-                        pct = progress.get("percent", 0)
-                        if pct:
-                            ui.print_info(f"  {status} {pct:.0f}%")
-                        elif status:
-                            ui.print_info(f"  {status}")
-                else:
-                    ui.print_error(f"Model '{arg}' not found. Run /models to see available models.")
-                    return True
-            old_model = model
-            model = arg
-            session.model = model
-            if hasattr(ui, "update_model"):
-                ui.update_model(model)
-            if hasattr(ui, "print_model_switch"):
-                ui.print_model_switch(old_model, model)
-            else:
-                ui.print_info(f"Switched to {model}")
-
-        elif command == "/context":
-            if not arg:
-                ui.print_info("Usage: /context <filepath>")
-                return True
-            paths = arg.split()
-            session.add_file_context(paths)
-            ui.print_info(f"Added {len(paths)} file(s) to context.")
-
-        elif command == "/diff":
-            result = await session.executor._run_command(
-                "git diff --stat HEAD 2>/dev/null || echo 'Not a git repo'"
-            )
-            ui.print_info(result)
-
-        elif command == "/git":
-            result = await session.executor._git_command("status -s")
-            ui.print_info(result or "Nothing to show.")
-
-        elif command == "/cd":
-            if not arg:
-                ui.print_info(f"Current: {cwd}")
-                return True
-            new_cwd = str(Path(cwd) / arg) if not Path(arg).is_absolute() else arg
-            if Path(new_cwd).is_dir():
-                old_cwd = cwd
-                cwd = str(Path(new_cwd).resolve())
-                session.cwd = cwd
-                session.executor.cwd = Path(cwd)
-                if hasattr(ui, "print_cwd_change"):
-                    ui.print_cwd_change(old_cwd, cwd)
-                    ui.update_cwd(cwd)
-                else:
-                    ui.print_info(f"Changed to {cwd}")
-            else:
-                ui.print_error(f"Directory not found: {new_cwd}")
-
-        elif command == "/config":
-            ui.print_info(cfg.to_display())
-
-        elif command == "/undo":
-            # Undo last file edit
-            history = session.executor._file_history
-            if not history:
-                ui.print_info("Nothing to undo.")
-                return True
-            last_path = list(history.keys())[-1]
-            snapshots = history[last_path]
-            if snapshots:
-                restored = snapshots.pop()
-                Path(last_path).write_text(restored)
-                ui.print_info(f"Restored {last_path}")
-            else:
-                ui.print_info("No more snapshots for that file.")
-
-        elif command in ("/pull",):
-            target = arg or cfg.default_model
-            ui.print_info(f"Pulling {target}...")
-            async for p in pull_model(target, cfg.ollama_url):
-                status = p.get("status", "")
-                pct = p.get("percent", 0)
-                if pct:
-                    ui.print_info(f"  {pct:.0f}% {status}")
-                elif status and status != last_cmd:
-                    ui.print_info(f"  {status}")
-                    last_cmd = status
-
+    def _on_tool(name: str, args: dict, result):
+        if result is None:
+            ui.tool_start(name, args)
         else:
-            ui.print_error(f"Unknown command: {command}. Type /help for commands.")
+            ui.tool_result(name, result)
 
-        return True
+    last_task = ""
 
-    # ── Initial task from CLI args ─────────────────────────────────────────────
-    if initial_task:
-        streaming_active = False
-        try:
-            await session.run(initial_task, on_token=on_token, on_tool=on_tool)
-            if streaming_active:
-                ui.streaming_end()
-        except KeyboardInterrupt:
-            ui.print_info("\nCancelled.")
-        return
-
-    # ── Interactive REPL ───────────────────────────────────────────────────────
     while True:
         try:
-            streaming_active = False
-            user_input = ui.user_prompt()
-        except (KeyboardInterrupt, EOFError):
-            ui.print_info("\nBye! 👋")
+            raw = input("\n❯ ").strip()
+        except (EOFError, KeyboardInterrupt):
+            ui.info("\nBye!")
             break
 
-        if not user_input:
+        if not raw:
             continue
-
-        # Repeat last command
-        if user_input == "!!":
-            user_input = last_cmd
-            if not user_input:
-                continue
-            ui.print_info(f"↑ {user_input}")
-
-        last_cmd = user_input
-        save_history(cfg.history_file)
 
         # Slash commands
-        if user_input.startswith("/"):
-            should_continue = await handle_command(user_input.lstrip("/").strip() if user_input == "/" else user_input)
-            if not should_continue:
+        if raw.startswith("/"):
+            parts = raw[1:].split(maxsplit=1)
+            cmd = parts[0].lower()
+            arg = parts[1] if len(parts) > 1 else ""
+
+            if cmd in ("exit", "quit", "q"):
+                ui.info("Bye!")
                 break
+            elif cmd == "clear":
+                session.reset()
+                ui.success("Conversation cleared.")
+            elif cmd == "help":
+                ui.info("""Commands:
+  /clear          — clear conversation history
+  /provider <id>  — switch provider (groq, openai, ollama, ...)
+  /model <name>   — switch model
+  /models         — list models for current provider
+  /context <file> — pre-load a file into context
+  /undo <file>    — undo last edit to a file
+  /cd <dir>       — change working directory
+  /check          — test current provider connection
+  /providers      — list all configured providers
+  /exit           — quit""")
+            elif cmd == "providers":
+                await cmd_list_providers(ui)
+            elif cmd == "check":
+                await cmd_check_provider(session.provider, ui)
+            elif cmd == "provider":
+                if arg and arg in PROVIDERS:
+                    session.provider = arg
+                    session.model = detect_model(arg)
+                    session.reset()
+                    cfg = _get_provider_config(arg)
+                    ui.success(f"Switched to {cfg['name']} / {session.model}")
+                else:
+                    ui.error(f"Unknown provider. Options: {', '.join(PROVIDERS.keys())}")
+            elif cmd == "model":
+                if arg:
+                    session.model = arg
+                    ui.success(f"Model set to {arg}")
+                else:
+                    ui.error("Usage: /model <name>")
+            elif cmd == "models":
+                ui.info(f"Fetching models for {session.provider}...")
+                models = await list_provider_models(session.provider)
+                for m in models[:30]:
+                    ui.dim(f"  {m}")
+                if len(models) > 30:
+                    ui.dim(f"  ... and {len(models)-30} more")
+            elif cmd == "context":
+                if arg:
+                    session.add_context_files([arg])
+                    ui.success(f"Loaded {arg} into context.")
+                else:
+                    ui.error("Usage: /context <file>")
+            elif cmd == "undo":
+                if arg:
+                    ok = session.executor.undo_file(arg)
+                    ui.success(f"Undone: {arg}") if ok else ui.error(f"No undo history for {arg}")
+                else:
+                    ui.error("Usage: /undo <file>")
+            elif cmd == "cd":
+                target = Path(arg).expanduser().resolve() if arg else Path.home()
+                if target.is_dir():
+                    session.cwd = str(target)
+                    session.executor.cwd = target
+                    ui.success(f"cwd: {target}")
+                else:
+                    ui.error(f"Not a directory: {arg}")
+            else:
+                ui.error(f"Unknown command: /{cmd}  — type /help for commands")
             continue
 
-        # Agent run
+        # Repeat last on !!
+        if raw == "!!":
+            if not last_task:
+                ui.error("No previous task.")
+                continue
+            raw = last_task
+
+        last_task = raw
+
         try:
-            await session.run(user_input, on_token=on_token, on_tool=on_tool)
-            if streaming_active:
-                ui.streaming_end()
+            ui.user_msg(raw)
+            await session.run(raw, on_token=_on_token, on_tool=_on_tool)
+            ui.stream_end()
         except KeyboardInterrupt:
-            if streaming_active:
-                ui.streaming_end()
-            ui.print_info("\nCancelled. Press Ctrl+C again to exit.")
+            ui.warning("\nInterrupted.")
         except Exception as e:
-            if streaming_active:
-                ui.streaming_end()
-            ui.print_error(str(e))
-
-    save_history(cfg.history_file)
-
-
-# ── Entrypoint ─────────────────────────────────────────────────────────────────
-def main():
-    parser = argparse.ArgumentParser(
-        prog="openclaw",
-        description="OpenClaw — Local-first agentic coding CLI powered by Ollama",
-    )
-    parser.add_argument("task", nargs="*", help="Task to run non-interactively")
-    parser.add_argument("-m", "--model", help="Model to use (e.g. qwen2.5-coder:7b)")
-    parser.add_argument("-d", "--dir", default=".", help="Working directory")
-    parser.add_argument("--ollama-url", help="Ollama URL (default: http://localhost:11434)")
-    parser.add_argument("--list-models", action="store_true", help="List available models and exit")
-    parser.add_argument("--no-banner", action="store_true", help="Skip banner")
-    parser.add_argument("--version", action="store_true", help="Show version")
-    args = parser.parse_args()
-
-    if args.version:
-        print("OpenClaw 1.0.0")
-        return
-
-    cfg = OpenClawConfig.load(args.dir)
-
-    if args.ollama_url:
-        cfg.ollama_url = args.ollama_url
-    if args.no_banner:
-        cfg.show_banner = False
-
-    async def _main():
-        # Check Ollama
-        if not await ollama_available(cfg.ollama_url):
-            print(f"❌ Ollama not reachable at {cfg.ollama_url}")
-            print("   Start it with: ollama serve")
-            print("   Or set OLLAMA_URL to the correct address")
-            sys.exit(1)
-
-        # List models
-        available = await list_models(cfg.ollama_url)
-
-        if args.list_models:
-            print("Available models:")
-            for m in available:
-                print(f"  {m}")
-            return
-
-        # Pick model
-        if args.model:
-            model = args.model
-        elif cfg.default_model in available:
-            model = cfg.default_model
-        else:
-            model = detect_best_model(available)
-            if not model:
-                print("❌ No models available. Pull one first:")
-                print("   ollama pull qwen2.5-coder:7b")
-                sys.exit(1)
-            print(f"  Using detected model: {model}")
-
-        cwd = str(Path(args.dir).resolve())
-        initial_task = " ".join(args.task) if args.task else None
-
-        await run_repl(cwd=cwd, model=model, cfg=cfg, initial_task=initial_task)
+            ui.error(str(e))
 
     try:
-        asyncio.run(_main())
+        readline.write_history_file(str(history_file))
+    except Exception:
+        pass
+
+
+async def main():
+    parser = argparse.ArgumentParser(
+        prog="openclaw",
+        description="OpenClaw — agentic coding agent for any LLM provider",
+    )
+    parser.add_argument("task", nargs="?", help="One-shot task (omit for interactive mode)")
+    parser.add_argument("-p", "--provider", default=None,
+                        help=f"Provider: {', '.join(PROVIDERS.keys())} (auto-detected from .env)")
+    parser.add_argument("-m", "--model", default=None, help="Model name")
+    parser.add_argument("-d", "--dir", default=None, help="Working directory")
+    parser.add_argument("--plain", action="store_true", help="Plain text output (no rich)")
+    parser.add_argument("--no-banner", action="store_true", help="Skip banner")
+    parser.add_argument("--list-providers", action="store_true", help="Show configured providers")
+    parser.add_argument("--check", metavar="PROVIDER", help="Test a provider connection")
+
+    args = parser.parse_args()
+    ui = _get_ui(args.plain)
+    cwd = str(Path(args.dir).expanduser().resolve()) if args.dir else os.getcwd()
+
+    if args.list_providers:
+        await cmd_list_providers(ui)
+        return
+
+    if args.check:
+        await cmd_check_provider(args.check, ui)
+        return
+
+    # Resolve provider + model
+    provider = args.provider or detect_provider()
+    model = args.model or detect_model(provider)
+
+    if provider not in PROVIDERS:
+        ui.error(f"Unknown provider: {provider}. Use: {', '.join(PROVIDERS.keys())}")
+        sys.exit(1)
+
+    session = AgentSession(model=model, provider=provider, cwd=cwd)
+
+    if args.task:
+        # One-shot mode
+        cfg = _get_provider_config(provider)
+        if not args.no_banner:
+            ui.info(f"OpenClaw [{cfg['icon']} {cfg['name']} / {model}] — {cwd}")
+
+        def _on_token(tok): ui.stream_token(tok)
+        def _on_tool(name, a, r):
+            if r is None: ui.tool_start(name, a)
+            else: ui.tool_result(name, r)
+
+        try:
+            await session.run(args.task, on_token=_on_token, on_tool=_on_tool)
+            ui.stream_end()
+        except Exception as e:
+            ui.error(str(e))
+            sys.exit(1)
+    else:
+        await interactive_loop(session, ui)
+
+
+def run():
+    try:
+        asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nBye!")
+        pass
 
 
 if __name__ == "__main__":
-    main()
+    run()

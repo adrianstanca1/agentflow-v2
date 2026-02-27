@@ -961,22 +961,47 @@ function KnowledgePage() {
 
 // ─── OpenClaw Page ─────────────────────────────────────────────────────────────
 function OpenClawPage() {
-  const [model, setModel] = useState("qwen2.5-coder:7b");
+  const [provider, setProvider] = useState("ollama");
+  const [model, setModel] = useState("");
   const [cwd, setCwd] = useState(".");
   const [sessionId] = useState(() => "oc-" + Math.random().toString(36).slice(2, 8));
   const [task, setTask] = useState("");
   const [events, setEvents] = useState<Array<{type: string; content: any; ts: number}>>([]);
   const [running, setRunning] = useState(false);
-  const [models, setModels] = useState<Array<{name: string; installed: boolean; recommended: boolean}>>([]);
+  const [providers, setProviders] = useState<Array<{id: string; name: string; icon: string; configured: boolean; free: boolean; default_model: string}>>([]);
+  const [models, setModels] = useState<Array<{name: string; installed: boolean; provider: string}>>([]);
   const [files, setFiles] = useState<Array<{name: string; path: string; is_dir: boolean; size: number}>>([]);
   const [openFile, setOpenFile] = useState<{path: string; content: string; extension: string; lines?: number} | null>(null);
   const [activeTab, setActiveTab] = useState<"agent" | "files" | "editor">("agent");
+  const [checkResult, setCheckResult] = useState<{ok: boolean; latency_ms?: number; error?: string} | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const eventsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    apiFetch("/openclaw/models").then(setModels).catch(() => {});
+    apiFetch("/openclaw/providers").then((data: any[]) => {
+      setProviders(data);
+      // Auto-select first configured provider
+      const first = data.find(p => p.configured) || data[0];
+      if (first) {
+        setProvider(first.id);
+        setModel(first.default_model || "");
+      }
+    }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!provider) return;
+    apiFetch(`/openclaw/models?provider=${provider}`).then((data: any[]) => {
+      setModels(data);
+      if (data.length > 0 && !model) setModel(data[0].name);
+    }).catch(() => {});
+  }, [provider]);
+
+  const testProvider = async () => {
+    setCheckResult(null);
+    const r = await apiFetch(`/openclaw/providers/${provider}/check`, { method: "POST" }).catch(() => ({ok: false, error: "Request failed"}));
+    setCheckResult(r);
+  };
 
   useEffect(() => {
     loadFiles(cwd);
@@ -1001,7 +1026,6 @@ function OpenClawPage() {
     } catch {}
   };
 
-  const installed = models.filter(m => m.installed);
 
   const run = async () => {
     if (!task.trim() || running) return;
@@ -1015,7 +1039,7 @@ function OpenClawPage() {
       const response = await fetch(`/openclaw/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task: taskText, model, cwd, session_id: sessionId, stream: true }),
+        body: JSON.stringify({ task: taskText, model, provider, cwd, session_id: sessionId, stream: true }),
         signal: abortRef.current.signal,
       });
 
@@ -1151,12 +1175,29 @@ function OpenClawPage() {
               </button>
             ))}
             <div className="w-px h-4 bg-neutral-800" />
-            <select value={model} onChange={e => setModel(e.target.value)}
-              className="bg-neutral-900 border border-neutral-800 text-[11px] text-neutral-400 rounded px-2 py-1 focus:outline-none">
-              {installed.length > 0
-                ? installed.map(m => <option key={m.name} value={m.name}>{m.name}{m.recommended ? " ⭐" : ""}</option>)
-                : <option>qwen2.5-coder:7b (not installed)</option>}
+            {/* Provider selector */}
+            <select value={provider} onChange={e => { setProvider(e.target.value); setModel(""); }}
+              className="bg-neutral-900 border border-neutral-800 text-[11px] text-neutral-400 rounded px-2 py-1 focus:outline-none max-w-[120px]">
+              {providers.map(p => (
+                <option key={p.id} value={p.id} disabled={!p.configured}>
+                  {p.icon} {p.name}{!p.configured ? " (no key)" : ""}
+                </option>
+              ))}
             </select>
+            {/* Model selector */}
+            <select value={model} onChange={e => setModel(e.target.value)}
+              className="bg-neutral-900 border border-neutral-800 text-[11px] text-neutral-400 rounded px-2 py-1 focus:outline-none max-w-[180px]">
+              {models.length > 0
+                ? models.map(m => <option key={m.name} value={m.name}>{m.name}</option>)
+                : <option value="">Loading models…</option>}
+            </select>
+            {/* Connection test */}
+            <button onClick={testProvider} title="Test provider connection"
+              className="text-neutral-700 hover:text-neutral-400 transition-colors">
+              {checkResult === null ? <span className="text-xs">⚡</span>
+                : checkResult.ok ? <span className="text-[10px] text-green-500">✓{checkResult.latency_ms}ms</span>
+                : <span className="text-[10px] text-red-500" title={checkResult.error}>✗</span>}
+            </button>
           </div>
         </div>
 
@@ -1170,9 +1211,9 @@ function OpenClawPage() {
                     <p className="text-5xl mb-3">🦅</p>
                     <p className="text-neutral-300 font-semibold text-sm">OpenClaw ready</p>
                     <p className="text-neutral-600 text-xs mt-1">
-                      {installed.length > 0
-                        ? `Using ${model} • ${installed.length} models available`
-                        : "Pull qwen2.5-coder:7b in Model Hub to start"}
+                      {providers.find(p => p.id === provider)?.configured
+                        ? `${providers.find(p=>p.id===provider)?.icon} ${providers.find(p=>p.id===provider)?.name} · ${model || "select a model"}`
+                        : "Add an API key in Settings to get started"}
                     </p>
                   </div>
                   <div className="grid grid-cols-2 gap-2 w-full max-w-xl">
@@ -1250,7 +1291,7 @@ function OpenClawPage() {
                     ✕ Stop
                   </button>
                 ) : (
-                  <button onClick={run} disabled={!task.trim() || installed.length === 0}
+                  <button onClick={run} disabled={!task.trim() || !model || running}
                     className="px-3 py-2 rounded-lg bg-cyan-900/30 border border-cyan-700/40 text-cyan-400 text-xs hover:bg-cyan-900/50 transition-colors disabled:opacity-30 flex-shrink-0">
                     Run ⏎
                   </button>

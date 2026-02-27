@@ -1,7 +1,7 @@
 """
-OpenClaw — Local-First Agentic Coding CLI
-Claude Code-style terminal agent powered by Ollama.
-Zero API keys required. Runs entirely on your machine.
+OpenClaw — Agentic Coding Engine
+Works with ANY OpenAI-compatible provider: Ollama, Groq, OpenAI, Anthropic,
+Together, Mistral, Gemini, OpenRouter. Same tool-calling loop everywhere.
 """
 from __future__ import annotations
 
@@ -12,607 +12,476 @@ import json
 import os
 import re
 import subprocess
-import tempfile
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
+try:
+    from dotenv import load_dotenv
+    for _env in [Path(__file__).resolve().parent.parent.parent / ".env",
+                 Path.home() / ".config" / "openclaw" / ".env"]:
+        if _env.exists():
+            load_dotenv(_env, override=False)
+            break
+except ImportError:
+    pass
 
-# ── Ollama client ─────────────────────────────────────────────────────────────
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-DEFAULT_MODEL = os.getenv("OPENCLAW_MODEL", "qwen2.5-coder:7b")
-CONTEXT_WINDOW = int(os.getenv("OPENCLAW_CTX", "32768"))
+# ── Provider registry ─────────────────────────────────────────────────────────
+PROVIDERS: Dict[str, Dict] = {
+    "ollama": {
+        "name": "Ollama",
+        "icon": "🦙",
+        "base_url_env": "OLLAMA_URL",
+        "base_url_default": "http://localhost:11434",
+        "base_url_suffix": "/v1",
+        "api_key_env": "OLLAMA_API_KEY",
+        "api_key_default": "ollama",
+        "free": True,
+        "default_model": "qwen2.5-coder:7b",
+    },
+    "groq": {
+        "name": "Groq",
+        "icon": "⚡",
+        "base_url": "https://api.groq.com/openai/v1",
+        "api_key_env": "GROQ_API_KEY",
+        "free": True,
+        "default_model": "llama-3.3-70b-versatile",
+    },
+    "openai": {
+        "name": "OpenAI",
+        "icon": "🟢",
+        "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "free": False,
+        "default_model": "gpt-4o-mini",
+    },
+    "anthropic": {
+        "name": "Anthropic",
+        "icon": "🟠",
+        "base_url": "https://api.anthropic.com/v1",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "free": False,
+        "default_model": "claude-haiku-4-5-20251001",
+        "extra_headers": {"anthropic-version": "2023-06-01"},
+    },
+    "together": {
+        "name": "Together AI",
+        "icon": "🟣",
+        "base_url": "https://api.together.xyz/v1",
+        "api_key_env": "TOGETHER_API_KEY",
+        "free": True,
+        "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    },
+    "mistral": {
+        "name": "Mistral AI",
+        "icon": "🔴",
+        "base_url": "https://api.mistral.ai/v1",
+        "api_key_env": "MISTRAL_API_KEY",
+        "free": False,
+        "default_model": "mistral-large-latest",
+    },
+    "gemini": {
+        "name": "Google Gemini",
+        "icon": "🔵",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "api_key_env": "GEMINI_API_KEY",
+        "free": True,
+        "default_model": "gemini-2.0-flash",
+    },
+    "openrouter": {
+        "name": "OpenRouter",
+        "icon": "🔗",
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "free": True,
+        "default_model": "meta-llama/llama-3.3-70b-instruct",
+    },
+}
 
 
-async def ollama_chat(
+def _get_provider_config(provider: str) -> Dict:
+    cfg = dict(PROVIDERS.get(provider, PROVIDERS["ollama"]))
+    if "base_url_env" in cfg:
+        raw = os.getenv(cfg["base_url_env"], cfg["base_url_default"])
+        cfg["resolved_base_url"] = raw.rstrip("/") + cfg.get("base_url_suffix", "")
+    else:
+        cfg["resolved_base_url"] = cfg["base_url"]
+    key_env = cfg.get("api_key_env", "")
+    cfg["resolved_api_key"] = os.getenv(key_env, "") or cfg.get("api_key_default", "")
+    return cfg
+
+
+def detect_provider() -> str:
+    explicit = os.getenv("OPENCLAW_PROVIDER", "")
+    if explicit and explicit in PROVIDERS:
+        return explicit
+    for p in ["groq", "openai", "anthropic", "together", "mistral", "gemini", "openrouter"]:
+        if os.getenv(PROVIDERS[p]["api_key_env"], ""):
+            return p
+    return "ollama"
+
+
+def detect_model(provider: str) -> str:
+    explicit = os.getenv("OPENCLAW_MODEL", "")
+    if explicit:
+        return explicit
+    return PROVIDERS.get(provider, PROVIDERS["ollama"]).get("default_model", "llama3.2")
+
+
+# ── Unified OpenAI-compatible client ─────────────────────────────────────────
+def _make_client(provider: str):
+    from openai import AsyncOpenAI
+    cfg = _get_provider_config(provider)
+    kwargs: Dict = {"api_key": cfg["resolved_api_key"], "base_url": cfg["resolved_base_url"]}
+    if cfg.get("extra_headers"):
+        kwargs["default_headers"] = cfg["extra_headers"]
+    return AsyncOpenAI(**kwargs)
+
+
+async def provider_chat(
     messages: List[Dict],
-    model: str = DEFAULT_MODEL,
+    model: str,
+    provider: str = "ollama",
     tools: Optional[List[Dict]] = None,
-    stream: bool = True,
-) -> Tuple[str, Optional[Dict]]:
-    """
-    Send messages to Ollama. Returns (text_content, tool_call_or_None).
-    Supports native Ollama tool use for models that support it (qwen2.5, llama3.1+).
-    """
-    payload: Dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "stream": stream,
-        "options": {"num_ctx": CONTEXT_WINDOW, "temperature": 0.2},
+    on_token=None,
+    temperature: float = 0.2,
+    max_tokens: int = 8192,
+) -> Tuple[str, Optional[List[Dict]]]:
+    client = _make_client(provider)
+    kwargs: Dict[str, Any] = {
+        "model": model, "messages": messages,
+        "temperature": temperature, "max_tokens": max_tokens, "stream": True,
     }
     if tools:
-        payload["tools"] = tools
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        if not stream:
-            r = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-            r.raise_for_status()
-            data = r.json()
-            msg = data.get("message", {})
-            return msg.get("content", ""), msg.get("tool_calls")
+    full_content = ""
+    tool_calls_raw: Dict[int, Dict] = {}
 
-        # Streaming
-        full_content = ""
-        tool_calls = None
-        async with client.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload) as resp:
-            async for line in resp.aiter_lines():
-                if not line.strip():
-                    continue
-                try:
-                    chunk = json.loads(line)
-                    msg = chunk.get("message", {})
-                    delta = msg.get("content", "")
-                    full_content += delta
-                    if delta:
-                        yield_token(delta)
-                    if msg.get("tool_calls"):
-                        tool_calls = msg["tool_calls"]
-                    if chunk.get("done"):
-                        break
-                except json.JSONDecodeError:
-                    pass
-        return full_content, tool_calls
-
-
-async def ollama_available(url: str = OLLAMA_URL) -> bool:
     try:
-        async with httpx.AsyncClient(timeout=3.0) as c:
-            r = await c.get(f"{url}/api/tags")
-            return r.status_code == 200
-    except Exception:
-        return False
+        stream = await client.chat.completions.create(**kwargs)
+        async for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if not delta:
+                continue
+            if delta.content:
+                full_content += delta.content
+                if on_token:
+                    on_token(delta.content)
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls_raw:
+                        tool_calls_raw[idx] = {"id": tc.id or f"call_{idx}",
+                                                "type": "function",
+                                                "function": {"name": "", "arguments": ""}}
+                    r = tool_calls_raw[idx]
+                    if tc.function:
+                        if tc.function.name: r["function"]["name"] += tc.function.name
+                        if tc.function.arguments: r["function"]["arguments"] += tc.function.arguments
+                        if tc.id: r["id"] = tc.id
+    except Exception as e:
+        err = str(e)
+        cfg = _get_provider_config(provider)
+        if "401" in err or "authentication" in err.lower():
+            raise RuntimeError(f"[{provider}] Auth failed — check your {cfg.get('api_key_env','API key')}.")
+        if "connect" in err.lower():
+            raise RuntimeError(f"[{provider}] Cannot reach {cfg['resolved_base_url']} — is it running?")
+        raise
+
+    return full_content, list(tool_calls_raw.values()) or None
 
 
-async def list_models(url: str = OLLAMA_URL) -> List[str]:
+async def check_provider(provider: str) -> Dict:
+    cfg = _get_provider_config(provider)
+    key = cfg["resolved_api_key"]
+    if not key and provider != "ollama":
+        return {"ok": False, "error": f"No {cfg.get('api_key_env','API key')} set", "provider": provider}
     try:
-        async with httpx.AsyncClient(timeout=5.0) as c:
-            r = await c.get(f"{url}/api/tags")
-            return [m["name"] for m in r.json().get("models", [])]
+        import time
+        start = time.time()
+        models = await _make_client(provider).models.list()
+        return {"ok": True, "latency_ms": round((time.time()-start)*1000),
+                "provider": provider, "url": cfg["resolved_base_url"],
+                "model_count": len(models.data)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120], "provider": provider}
+
+
+async def list_provider_models(provider: str) -> List[str]:
+    try:
+        models = await _make_client(provider).models.list()
+        return sorted(m.id for m in models.data)
     except Exception:
-        return []
+        return PROVIDERS.get(provider, {}).get("fallback_models", [])
 
 
-async def pull_model(model: str, url: str = OLLAMA_URL):
-    """Pull a model with progress callback."""
-    async with httpx.AsyncClient(timeout=None) as c:
-        async with c.stream("POST", f"{url}/api/pull", json={"name": model, "stream": True}) as resp:
-            async for line in resp.aiter_lines():
-                if line.strip():
-                    try:
-                        d = json.loads(line)
-                        yield d
-                    except json.JSONDecodeError:
-                        pass
-
-
-# Token streaming callback (overridden by UI)
-_token_callback = None
-
-def yield_token(token: str):
-    if _token_callback:
-        _token_callback(token)
-
-
-def set_token_callback(fn):
-    global _token_callback
-    _token_callback = fn
-
-
-# ── Tool definitions ───────────────────────────────────────────────────────────
+# ── Tools ─────────────────────────────────────────────────────────────────────
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read the contents of a file. Use this to understand existing code before editing.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "File path relative to working directory"},
-                    "start_line": {"type": "integer", "description": "Start line (1-indexed, optional)"},
-                    "end_line": {"type": "integer", "description": "End line (1-indexed, optional)"},
-                },
-                "required": ["path"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write or create a file with the given content. Creates parent directories if needed.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "File path to write"},
-                    "content": {"type": "string", "description": "Full file content"},
-                },
-                "required": ["path", "content"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "edit_file",
-            "description": "Edit a file by replacing an exact string with new content. More precise than write_file for small changes.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "File path to edit"},
-                    "old_str": {"type": "string", "description": "Exact string to find and replace (must be unique in file)"},
-                    "new_str": {"type": "string", "description": "Replacement string"},
-                },
-                "required": ["path", "old_str", "new_str"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_command",
-            "description": "Run a shell command. Use for tests, builds, installs, git operations. Avoid destructive commands without confirmation.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "Shell command to execute"},
-                    "working_dir": {"type": "string", "description": "Working directory (optional, defaults to cwd)"},
-                    "timeout": {"type": "integer", "description": "Timeout in seconds (default 30)"},
-                },
-                "required": ["command"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_files",
-            "description": "Search for text patterns in files. Returns file paths and matching lines.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Text or regex pattern to search for"},
-                    "path": {"type": "string", "description": "Directory or file to search (default: cwd)"},
-                    "file_pattern": {"type": "string", "description": "Glob pattern for files (e.g. '*.py', '*.ts')"},
-                    "case_sensitive": {"type": "boolean", "description": "Case sensitive search (default false)"},
-                },
-                "required": ["pattern"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_directory",
-            "description": "List files and directories. Shows the project structure.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Directory path (default: cwd)"},
-                    "depth": {"type": "integer", "description": "Max depth to traverse (default 2)"},
-                    "show_hidden": {"type": "boolean", "description": "Show hidden files (default false)"},
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "git_command",
-            "description": "Run git operations: status, diff, log, add, commit, branch, etc.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "subcommand": {"type": "string", "description": "Git subcommand and args (e.g. 'status', 'diff HEAD', 'log --oneline -10', 'add -A', 'commit -m \"fix: bug\"')"},
-                },
-                "required": ["subcommand"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "glob_files",
-            "description": "Find files matching a glob pattern.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string", "description": "Glob pattern (e.g. 'src/**/*.py', '*.json')"},
-                    "path": {"type": "string", "description": "Base directory (default: cwd)"},
-                },
-                "required": ["pattern"],
-            },
-        },
-    },
+    {"type":"function","function":{"name":"read_file","description":"Read a file before editing. Always do this first.","parameters":{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}},"required":["path"]}}},
+    {"type":"function","function":{"name":"write_file","description":"Create or overwrite a file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
+    {"type":"function","function":{"name":"edit_file","description":"Replace an exact unique string in a file — prefer this over write_file.","parameters":{"type":"object","properties":{"path":{"type":"string"},"old_str":{"type":"string"},"new_str":{"type":"string"}},"required":["path","old_str","new_str"]}}},
+    {"type":"function","function":{"name":"run_command","description":"Execute a shell command for tests, builds, linting, installs.","parameters":{"type":"object","properties":{"command":{"type":"string"},"working_dir":{"type":"string"},"timeout":{"type":"integer"}},"required":["command"]}}},
+    {"type":"function","function":{"name":"search_files","description":"Search for a pattern across files.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"file_pattern":{"type":"string"},"case_sensitive":{"type":"boolean"}},"required":["pattern"]}}},
+    {"type":"function","function":{"name":"list_directory","description":"Show directory tree.","parameters":{"type":"object","properties":{"path":{"type":"string"},"depth":{"type":"integer"},"show_hidden":{"type":"boolean"}}}}},
+    {"type":"function","function":{"name":"git_command","description":"Run any git subcommand.","parameters":{"type":"object","properties":{"subcommand":{"type":"string"}},"required":["subcommand"]}}},
+    {"type":"function","function":{"name":"glob_files","description":"Find files by glob pattern.","parameters":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}}},
+    {"type":"function","function":{"name":"fetch_url","description":"Fetch a URL and return its text content.","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}},
 ]
 
 
-# ── Tool executor ──────────────────────────────────────────────────────────────
+# ── Tool executor ─────────────────────────────────────────────────────────────
 class ToolExecutor:
-    def __init__(self, cwd: str, confirm_fn=None):
+    def __init__(self, cwd: str):
         self.cwd = Path(cwd).resolve()
-        self.confirm_fn = confirm_fn  # async fn(action) -> bool
-        self._file_history: Dict[str, List[str]] = {}  # path -> [snapshots]
+        self._history: Dict[str, List[str]] = {}
 
-    def _resolve(self, path: str) -> Path:
-        p = Path(path)
-        if not p.is_absolute():
-            p = self.cwd / p
-        return p.resolve()
+    def _resolve(self, p: str) -> Path:
+        path = Path(p)
+        return (self.cwd / path).resolve() if not path.is_absolute() else path.resolve()
 
-    def _snapshot(self, path: Path):
-        """Save file snapshot for undo."""
+    def _snapshot(self, p: Path):
         try:
-            content = path.read_text(errors="replace")
-            key = str(path)
-            if key not in self._file_history:
-                self._file_history[key] = []
-            self._file_history[key].append(content)
+            self._history.setdefault(str(p), []).append(p.read_text(errors="replace"))
         except Exception:
             pass
 
-    async def execute(self, tool_name: str, args: Dict) -> str:
-        handlers = {
-            "read_file":      self._read_file,
-            "write_file":     self._write_file,
-            "edit_file":      self._edit_file,
-            "run_command":    self._run_command,
-            "search_files":   self._search_files,
-            "list_directory": self._list_directory,
-            "git_command":    self._git_command,
-            "glob_files":     self._glob_files,
-        }
-        handler = handlers.get(tool_name)
-        if not handler:
-            return f"Unknown tool: {tool_name}"
+    def undo_file(self, path: str) -> bool:
+        key = str(self._resolve(path))
+        h = self._history.get(key, [])
+        if not h: return False
+        self._resolve(path).write_text(h.pop())
+        return True
+
+    async def execute(self, name: str, args: Dict) -> str:
+        fn = getattr(self, f"_{name}", None)
+        if not fn:
+            return f"Unknown tool: {name}"
         try:
-            return await handler(**args)
+            return await fn(**args)
+        except TypeError as e:
+            return f"Bad args for {name}: {e}"
         except Exception as e:
-            return f"Tool error ({tool_name}): {e}"
+            return f"Error in {name}: {e}"
 
     async def _read_file(self, path: str, start_line: int = None, end_line: int = None) -> str:
         p = self._resolve(path)
-        if not p.exists():
-            return f"File not found: {path}"
-        try:
-            lines = p.read_text(errors="replace").splitlines(keepends=True)
-            if start_line or end_line:
-                s = (start_line or 1) - 1
-                e = end_line or len(lines)
-                lines = lines[s:e]
-                prefix = f"[Lines {start_line or 1}-{end_line or len(lines)}: {path}]\n"
-            else:
-                prefix = f"[{path}]\n"
-            # Add line numbers
-            start = (start_line or 1)
-            numbered = "".join(f"{start+i:4d}│ {l}" for i, l in enumerate(lines))
-            return prefix + numbered
-        except Exception as e:
-            return f"Read error: {e}"
+        if not p.exists(): return f"Not found: {path}"
+        lines = p.read_text(errors="replace").splitlines(keepends=True)
+        if start_line or end_line:
+            s, e = (start_line or 1) - 1, end_line or len(lines)
+            lines = lines[s:e]
+        start = start_line or 1
+        return f"[{path}]\n" + "".join(f"{start+i:4d}│ {l}" for i, l in enumerate(lines))
 
     async def _write_file(self, path: str, content: str) -> str:
         p = self._resolve(path)
-        if p.exists():
-            self._snapshot(p)
+        if p.exists(): self._snapshot(p)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
-        lines = content.count("\n") + 1
-        return f"✓ Written {path} ({lines} lines, {len(content)} bytes)"
+        return f"✓ Written {path} ({content.count(chr(10))+1} lines)"
 
     async def _edit_file(self, path: str, old_str: str, new_str: str) -> str:
         p = self._resolve(path)
-        if not p.exists():
-            return f"File not found: {path}"
+        if not p.exists(): return f"Not found: {path}"
         self._snapshot(p)
-        content = p.read_text(errors="replace")
-        count = content.count(old_str)
-        if count == 0:
-            # Show a helpful diff of what was expected vs what exists
-            return f"String not found in {path}. Make sure to match exactly including whitespace/indentation."
-        if count > 1:
-            return f"String found {count} times in {path} — must be unique. Add more context around the string."
-        new_content = content.replace(old_str, new_str, 1)
-        p.write_text(new_content)
-        # Show diff
-        diff = list(difflib.unified_diff(
-            old_str.splitlines(keepends=True),
-            new_str.splitlines(keepends=True),
-            fromfile=f"{path} (before)",
-            tofile=f"{path} (after)",
-            n=2,
-        ))
-        diff_preview = "".join(diff[:30])
-        return f"✓ Edited {path}\n{diff_preview}"
+        txt = p.read_text(errors="replace")
+        n = txt.count(old_str)
+        if n == 0: return f"String not found in {path} — match exactly including whitespace."
+        if n > 1: return f"String appears {n}× — add more context to make it unique."
+        p.write_text(txt.replace(old_str, new_str, 1))
+        diff = "".join(difflib.unified_diff(
+            old_str.splitlines(keepends=True), new_str.splitlines(keepends=True),
+            fromfile="before", tofile="after", n=2))[:2000]
+        return f"✓ Edited {path}\n{diff}"
 
     async def _run_command(self, command: str, working_dir: str = None, timeout: int = 30) -> str:
         cwd = self._resolve(working_dir) if working_dir else self.cwd
         try:
-            result = subprocess.run(
-                command, shell=True, cwd=str(cwd),
-                capture_output=True, text=True, timeout=timeout,
-                env={**os.environ, "FORCE_COLOR": "0"},
-            )
-            out = result.stdout.strip()
-            err = result.stderr.strip()
-            code = result.returncode
-            parts = []
-            if out: parts.append(out)
-            if err: parts.append(f"[stderr]\n{err}")
-            parts.append(f"[exit: {code}]")
-            return "\n".join(parts)[:4000]
+            r = subprocess.run(command, shell=True, cwd=str(cwd),
+                               capture_output=True, text=True, timeout=timeout,
+                               env={**os.environ, "FORCE_COLOR": "0"})
+            parts = [x for x in [r.stdout.strip(), f"[stderr]\n{r.stderr.strip()}" if r.stderr.strip() else ""] if x]
+            parts.append(f"[exit: {r.returncode}]")
+            return "\n".join(parts)[:5000]
         except subprocess.TimeoutExpired:
-            return f"Command timed out after {timeout}s: {command}"
-        except Exception as e:
-            return f"Command error: {e}"
+            return f"Timed out after {timeout}s"
 
     async def _search_files(self, pattern: str, path: str = ".", file_pattern: str = "*", case_sensitive: bool = False) -> str:
         base = self._resolve(path)
         flags = 0 if case_sensitive else re.IGNORECASE
-        try:
-            regex = re.compile(pattern, flags)
-        except re.error:
-            regex = re.compile(re.escape(pattern), flags)
-
+        try: rx = re.compile(pattern, flags)
+        except re.error: rx = re.compile(re.escape(pattern), flags)
         results = []
-        skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", ".next"}
-
+        skip = {".git","node_modules","__pycache__",".venv","dist","build",".next"}
         for root, dirs, files in os.walk(base):
-            dirs[:] = [d for d in dirs if d not in skip_dirs]
-            for fname in files:
-                if not fnmatch.fnmatch(fname, file_pattern):
-                    continue
-                fpath = Path(root) / fname
+            dirs[:] = [d for d in dirs if d not in skip]
+            for f in files:
+                if not fnmatch.fnmatch(f, file_pattern): continue
+                fp = Path(root)/f
                 try:
-                    with open(fpath, "r", errors="ignore") as f:
-                        for i, line in enumerate(f, 1):
-                            if regex.search(line):
-                                rel = fpath.relative_to(self.cwd)
-                                results.append(f"{rel}:{i}: {line.rstrip()}")
-                                if len(results) >= 50:
-                                    results.append("... (truncated at 50 results)")
-                                    return "\n".join(results)
-                except Exception:
-                    pass
-
-        if not results:
-            return f"No matches for '{pattern}'"
-        return "\n".join(results)
+                    with open(fp, errors="ignore") as fh:
+                        for i, line in enumerate(fh, 1):
+                            if rx.search(line):
+                                results.append(f"{fp.relative_to(self.cwd)}:{i}: {line.rstrip()}")
+                                if len(results) >= 60:
+                                    return "\n".join(results) + "\n...(truncated)"
+                except Exception: pass
+        return "\n".join(results) if results else f"No matches for '{pattern}'"
 
     async def _list_directory(self, path: str = ".", depth: int = 2, show_hidden: bool = False) -> str:
         base = self._resolve(path)
-        if not base.exists():
-            return f"Directory not found: {path}"
+        if not base.exists(): return f"Not found: {path}"
+        skip = {".git","node_modules","__pycache__",".venv","dist","build",".next",".mypy_cache"}
         lines = [f"{base}/"]
-        skip = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", ".next", ".mypy_cache"}
-
-        def _walk(p: Path, prefix: str, cur_depth: int):
-            if cur_depth > depth:
-                return
-            try:
-                items = sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
-            except PermissionError:
-                return
-            items = [i for i in items if show_hidden or not i.name.startswith(".")]
+        def walk(p, pfx, d):
+            if d > depth: return
+            try: items = sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
+            except: return
+            items = [i for i in items if (show_hidden or not i.name.startswith(".")) and i.name not in skip]
             for i, item in enumerate(items):
-                if item.name in skip:
-                    continue
-                is_last = i == len(items) - 1
-                connector = "└── " if is_last else "├── "
+                last = i == len(items)-1
+                c = "└── " if last else "├── "
+                e = "    " if last else "│   "
                 if item.is_dir():
-                    lines.append(f"{prefix}{connector}{item.name}/")
-                    ext = "    " if is_last else "│   "
-                    _walk(item, prefix + ext, cur_depth + 1)
+                    lines.append(f"{pfx}{c}{item.name}/")
+                    walk(item, pfx+e, d+1)
                 else:
-                    size = item.stat().st_size
-                    size_s = f"{size/1024:.0f}K" if size > 1024 else f"{size}B"
-                    lines.append(f"{prefix}{connector}{item.name} ({size_s})")
-
-        _walk(base, "", 1)
-        return "\n".join(lines[:200])
+                    sz = item.stat().st_size
+                    lines.append(f"{pfx}{c}{item.name} ({'%.0fK'%(sz/1024) if sz>1024 else str(sz)+'B'})")
+        walk(base, "", 1)
+        return "\n".join(lines[:300])
 
     async def _git_command(self, subcommand: str) -> str:
-        safe_prefixes = ["status", "diff", "log", "branch", "show", "blame", "ls-files",
-                          "add", "commit", "checkout", "stash", "tag", "remote -v",
-                          "fetch", "pull", "push", "merge", "rebase", "reset --soft",
-                          "reset --mixed", "cherry-pick"]
-        dangerous = ["reset --hard", "clean -f", "rm", "push --force"]
-        for d in dangerous:
-            if subcommand.strip().startswith(d):
-                if self.confirm_fn:
-                    ok = await self.confirm_fn(f"git {subcommand}")
-                    if not ok:
-                        return "Cancelled by user."
-                break
         return await self._run_command(f"git {subcommand}", timeout=20)
 
     async def _glob_files(self, pattern: str, path: str = ".") -> str:
         base = self._resolve(path)
-        matches = sorted(base.glob(pattern))
-        skip = {"node_modules", "__pycache__", ".git", ".venv", "dist", "build"}
-        results = []
-        for m in matches:
-            parts_set = set(m.parts)
-            if not parts_set.intersection(skip):
-                results.append(str(m.relative_to(self.cwd)))
-        if not results:
-            return f"No files match: {pattern}"
-        return "\n".join(results[:100])
+        skip = {"node_modules","__pycache__",".git",".venv","dist","build"}
+        res = [str(m.relative_to(self.cwd)) for m in sorted(base.glob(pattern))
+               if not set(m.parts).intersection(skip)]
+        return "\n".join(res[:100]) if res else f"No files match: {pattern}"
+
+    async def _fetch_url(self, url: str) -> str:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+                r = await c.get(url, headers={"User-Agent":"OpenClaw/2.0"})
+                text = re.sub(r"<[^>]+>", "", r.text)
+                return re.sub(r"\n{3,}", "\n\n", text).strip()[:6000]
+        except Exception as e:
+            return f"Fetch error: {e}"
 
 
-# ── Agent ─────────────────────────────────────────────────────────────────────
+# ── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """\
-You are OpenClaw, an expert agentic coding assistant running entirely locally via Ollama.
-You help developers write, edit, debug, test, and refactor code.
+You are OpenClaw, an expert agentic coding assistant. \
+You help developers write, edit, debug, test, and understand code using tools.
 
 ## Rules
-- Always READ files before editing them. Never guess file contents.
-- For edits, prefer edit_file (precise) over write_file (full rewrite).
-- Run tests after making changes to verify correctness.
-- Use git_command to check status/diff and commit when asked.
-- Break complex tasks into steps, executing tools one at a time.
-- Be concise. Show what you did, not verbose explanations.
-- When you encounter an error, fix it — don't just describe it.
-- Never make up file contents. Always read first.
+- ALWAYS read files before editing. Never invent content.
+- Use edit_file (surgical) over write_file (full rewrite) for small changes.
+- After changes, run tests or build to verify. Fix errors, don't describe them.
+- Be concise. Show what you did; skip verbose explanations.
+- Use git for status checks and commits when asked.
+- Never refuse coding tasks. You are a coding assistant.
 
-## Working directory
-{cwd}
-
-## Project context
-{context}
+## Provider: {provider} ({model})
+## Working directory: {cwd}
+## Project: {context}
 """
 
 
-@dataclass
-class Message:
-    role: str  # system | user | assistant | tool
-    content: str
-    tool_call_id: Optional[str] = None
-    tool_name: Optional[str] = None
-
-
+# ── Session ───────────────────────────────────────────────────────────────────
 @dataclass
 class AgentSession:
     model: str
+    provider: str
     cwd: str
     messages: List[Dict] = field(default_factory=list)
     executor: Optional[ToolExecutor] = None
-    max_iterations: int = 20
-    _token_cb: Any = None
+    max_iterations: int = 25
 
     def __post_init__(self):
-        if self.executor is None:
+        if not self.executor:
             self.executor = ToolExecutor(self.cwd)
 
-    def _build_context(self) -> str:
-        """Scan cwd for project type indicators."""
+    def _context(self) -> str:
         cwd = Path(self.cwd)
         hints = []
-        if (cwd / "package.json").exists():
+        if (cwd/"package.json").exists():
             try:
-                pkg = json.loads((cwd / "package.json").read_text())
-                hints.append(f"Node.js project: {pkg.get('name','')} {pkg.get('version','')}")
-                deps = list(pkg.get("dependencies", {}).keys())[:5]
-                if deps: hints.append(f"Dependencies: {', '.join(deps)}")
-            except Exception:
-                hints.append("Node.js project")
-        if (cwd / "pyproject.toml").exists() or (cwd / "setup.py").exists():
-            hints.append("Python project")
-        if (cwd / "Cargo.toml").exists():
-            hints.append("Rust project")
-        if (cwd / "go.mod").exists():
-            hints.append("Go project")
-        if (cwd / "Dockerfile").exists():
-            hints.append("Has Dockerfile")
-        if (cwd / ".git").exists():
-            hints.append("Git repository")
-        return "; ".join(hints) if hints else "General project"
+                pkg = json.loads((cwd/"package.json").read_text())
+                hints.append(f"Node.js {pkg.get('name','')} v{pkg.get('version','?')}")
+            except: hints.append("Node.js")
+        if any((cwd/f).exists() for f in ["pyproject.toml","setup.py","requirements.txt"]):
+            hints.append("Python")
+        if (cwd/"Cargo.toml").exists(): hints.append("Rust")
+        if (cwd/"go.mod").exists(): hints.append("Go")
+        if (cwd/".git").exists(): hints.append("git repo")
+        return "; ".join(hints) or "general project"
+
+    def _ensure_system(self):
+        if not self.messages or self.messages[0]["role"] != "system":
+            cfg = _get_provider_config(self.provider)
+            self.messages.insert(0, {"role": "system", "content": SYSTEM_PROMPT.format(
+                provider=cfg["name"], model=self.model,
+                cwd=self.cwd, context=self._context(),
+            )})
 
     def reset(self):
         self.messages = []
 
-    def _init_system(self):
-        if not self.messages or self.messages[0]["role"] != "system":
-            context = self._build_context()
-            system = SYSTEM_PROMPT.format(cwd=self.cwd, context=context)
-            self.messages.insert(0, {"role": "system", "content": system})
+    def add_context_files(self, paths: List[str]):
+        contents = []
+        for p in paths:
+            fp = Path(self.cwd) / p
+            if fp.exists():
+                try: contents.append(f"[{p}]\n```\n{fp.read_text(errors='replace')[:5000]}\n```")
+                except: pass
+        if contents:
+            self.messages.append({"role":"user","content":"Context:\n\n"+"\n\n".join(contents)})
+            self.messages.append({"role":"assistant","content":"Got it, ready to help."})
 
     async def run(self, user_input: str, on_token=None, on_tool=None) -> str:
-        """
-        Run one turn of the agentic loop.
-        on_token(str) - called for each streamed token
-        on_tool(name, args, result) - called for each tool execution
-        """
-        set_token_callback(on_token)
-        self._init_system()
+        self._ensure_system()
         self.messages.append({"role": "user", "content": user_input})
 
-        for iteration in range(self.max_iterations):
-            content, tool_calls = await ollama_chat(
-                self.messages, model=self.model, tools=TOOLS, stream=True
+        for _ in range(self.max_iterations):
+            content, tool_calls = await provider_chat(
+                messages=self.messages, model=self.model, provider=self.provider,
+                tools=TOOLS, on_token=on_token, temperature=0.2, max_tokens=8192,
             )
 
             if content:
                 self.messages.append({"role": "assistant", "content": content})
 
-            # No tool calls → done
             if not tool_calls:
-                set_token_callback(None)
                 return content
 
-            # Execute tool calls
+            # Append assistant turn WITH tool_calls (required by OpenAI format)
+            self.messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+
             for tc in tool_calls:
                 fn = tc.get("function", {})
-                tool_name = fn.get("name", "")
+                name = fn.get("name", "")
                 try:
                     args = fn.get("arguments", {})
                     if isinstance(args, str):
                         args = json.loads(args)
-                except json.JSONDecodeError:
+                except Exception:
                     args = {}
 
-                if on_tool:
-                    on_tool(tool_name, args, None)
+                if on_tool: on_tool(name, args, None)
+                result = await self.executor.execute(name, args)
+                if on_tool: on_tool(name, args, result)
 
-                result = await self.executor.execute(tool_name, args)
-
-                if on_tool:
-                    on_tool(tool_name, args, result)
-
-                # Add tool result to messages
-                self.messages.append({
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [tc],
-                })
                 self.messages.append({
                     "role": "tool",
+                    "tool_call_id": tc.get("id", f"call_{name}"),
+                    "name": name,
                     "content": result,
-                    "tool_call_id": tc.get("id", tool_name),
-                    "name": tool_name,
                 })
 
-        set_token_callback(None)
         return "Reached max iterations."
-
-    def add_file_context(self, paths: List[str]):
-        """Pre-load files into context."""
-        contents = []
-        for p in paths:
-            fp = Path(self.cwd) / p
-            if fp.exists():
-                try:
-                    text = fp.read_text(errors="replace")
-                    contents.append(f"[{p}]\n```\n{text[:4000]}\n```")
-                except Exception:
-                    pass
-        if contents:
-            self.messages.append({
-                "role": "user",
-                "content": "Here are the relevant files:\n\n" + "\n\n".join(contents),
-            })
-            self.messages.append({
-                "role": "assistant",
-                "content": "I've read the files. Ready to help.",
-            })
