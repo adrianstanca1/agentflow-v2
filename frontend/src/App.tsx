@@ -16,8 +16,11 @@ import {
 } from "lucide-react";
 
 // Config
-const API = (import.meta as any).env?.VITE_API_URL || "http://localhost:8000";
-const WS_URL = (import.meta as any).env?.VITE_WS_URL || "ws://localhost:8000";
+// Automatically use the same host the page is served from — works on any server
+const API = (import.meta as any).env?.VITE_API_URL ||
+  (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.host}` : "http://localhost:8000");
+const WS_URL = (import.meta as any).env?.VITE_WS_URL ||
+  (typeof window !== "undefined" ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}` : "ws://localhost:8000");
 
 async function apiFetch(path: string, opts: RequestInit = {}) {
   const res = await fetch(`${API}${path}`, {
@@ -1449,16 +1452,61 @@ export default function App() {
   const [page, setPage] = useState<Page>("chat");
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [stats, setStats] = useState<any>(null);
+  const [apiReady, setApiReady] = useState<boolean | null>(null); // null=checking
+  const [retries, setRetries] = useState(0);
 
   useEffect(() => {
-    const load = () => {
+    let attempts = 0;
+    const tryConnect = () => {
+      attempts++;
+      setRetries(attempts);
+      apiFetch("/health")
+        .then(() => {
+          setApiReady(true);
+          // Load data once connected
+          apiFetch("/agents").then(setAgents).catch(() => {});
+          apiFetch("/stats").then(setStats).catch(() => {});
+        })
+        .catch(() => {
+          setApiReady(false);
+          setTimeout(tryConnect, 2000); // retry every 2s
+        });
+    };
+    tryConnect();
+    const iv = setInterval(() => {
       apiFetch("/agents").then(setAgents).catch(() => {});
       apiFetch("/stats").then(setStats).catch(() => {});
-    };
-    load();
-    const iv = setInterval(load, 30000);
+    }, 30000);
     return () => clearInterval(iv);
   }, []);
+
+  // Loading / connecting screen
+  if (!apiReady) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-neutral-950 text-white gap-6">
+        <div className="text-center">
+          <div className="text-5xl mb-4">🦅</div>
+          <h1 className="text-xl font-bold text-cyan-400 mb-1">AgentFlow v2</h1>
+          <p className="text-neutral-500 text-sm">
+            {apiReady === null || retries <= 1
+              ? "Connecting to API…"
+              : `Waiting for API · attempt ${retries}…`}
+          </p>
+          <p className="text-neutral-700 text-xs mt-2 font-mono">{API}/health</p>
+        </div>
+        <div className="flex gap-1.5">
+          {[0,1,2].map(i => (
+            <div key={i} className="w-2 h-2 rounded-full bg-cyan-400 animate-bounce"
+              style={{ animationDelay: `${i * 0.15}s` }} />
+          ))}
+        </div>
+        <div className="text-xs text-neutral-700 max-w-xs text-center">
+          If this persists, make sure the server is running:<br />
+          <span className="font-mono text-neutral-600">python3 server.py</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen flex bg-neutral-950 text-white overflow-hidden" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
@@ -1470,6 +1518,7 @@ export default function App() {
         {page === "agents"    && <AgentsPage agents={agents} />}
         {page === "mcp"       && <MCPPage />}
         {page === "knowledge" && <KnowledgePage />}
+        {page === "openclaw"  && <OpenClawPage />}
         {page === "settings"  && <SettingsPage stats={stats} />}
       </div>
     </div>
