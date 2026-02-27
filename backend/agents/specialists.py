@@ -385,10 +385,15 @@ class TestCode:
 # ═══════════════════════════════════════════════════════════
 
 class CodingAgent(UniversalAgent):
+    """
+    Coding Agent — backed by OpenClaw's agentic tool loop.
+    Uses Ollama-native tool calling for file edits, shell commands, git ops.
+    Falls back to standard LangGraph when OpenClaw is unavailable.
+    """
     TOOLS = [execute_code, write_file, read_file, run_shell, web_search]
     def __init__(self, **kw):
         super().__init__(agent_id="coding", name="Coding Agent",
-            description="Code generation, debugging, testing, automation — runs code in sandbox",
+            description="Code generation, debugging, testing, git — powered by OpenClaw + Ollama",
             agent_type="coding", tools=self.TOOLS,
             model=kw.pop("model", settings.default_model_coding), **kw)
     def default_system_prompt(self):

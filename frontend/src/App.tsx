@@ -28,7 +28,7 @@ async function apiFetch(path: string, opts: RequestInit = {}) {
   return res.json();
 }
 
-type Page = "chat" | "models" | "agents" | "mcp" | "knowledge" | "settings";
+type Page = "chat" | "models" | "agents" | "mcp" | "knowledge" | "openclaw" | "settings";
 
 interface AgentInfo {
   id: string; name: string; description: string; type: string;
@@ -954,6 +954,239 @@ function KnowledgePage() {
 }
 
 // Settings Page
+
+// ─── OpenClaw Page ─────────────────────────────────────────────────────────────
+function OpenClawPage() {
+  const [task, setTask] = useState("");
+  const [model, setModel] = useState("qwen2.5-coder:7b");
+  const [cwd, setCwd] = useState(".");
+  const [sessionId] = useState(() => Math.random().toString(36).slice(2));
+  const [events, setEvents] = useState<Array<{type: string; content: any; ts: number}>>([]);
+  const [running, setRunning] = useState(false);
+  const [models, setModels] = useState<Array<{name: string; installed: boolean; recommended: boolean}>>([]);
+  const eventsEndRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    apiFetch("/openclaw/models").then(setModels).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    eventsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [events]);
+
+  const installed = models.filter(m => m.installed);
+
+  const run = async () => {
+    if (!task.trim() || running) return;
+    setRunning(true);
+    setEvents([]);
+    abortRef.current = new AbortController();
+    const taskText = task;
+    setTask("");
+
+    setEvents([{ type: "user", content: taskText, ts: Date.now() }]);
+
+    try {
+      const response = await fetch(`${window.location.origin}/openclaw/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: taskText, model, cwd, session_id: sessionId, stream: true }),
+        signal: abortRef.current.signal,
+      });
+
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let streamText = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        for (const line of chunk.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.event_type === "stream_token") {
+              streamText += evt.content;
+              setEvents(prev => {
+                const last = prev[prev.length - 1];
+                if (last?.type === "stream") {
+                  return [...prev.slice(0, -1), { ...last, content: last.content + evt.content }];
+                }
+                return [...prev, { type: "stream", content: evt.content, ts: Date.now() }];
+              });
+            } else if (evt.event_type === "tool_call") {
+              setEvents(prev => [...prev, { type: "tool_call", content: evt.content, ts: Date.now() }]);
+            } else if (evt.event_type === "tool_result") {
+              setEvents(prev => [...prev, { type: "tool_result", content: evt.content, ts: Date.now() }]);
+            } else if (evt.event_type === "complete") {
+              setEvents(prev => [...prev, { type: "complete", content: evt.content, ts: Date.now() }]);
+            } else if (evt.event_type === "error") {
+              setEvents(prev => [...prev, { type: "error", content: evt.content, ts: Date.now() }]);
+            }
+          } catch {}
+        }
+      }
+    } catch (e: any) {
+      if (e.name !== "AbortError") {
+        setEvents(prev => [...prev, { type: "error", content: e.message, ts: Date.now() }]);
+      }
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const TOOL_ICONS: Record<string, string> = {
+    read_file: "📖", write_file: "✍️", edit_file: "✏️",
+    run_command: "⚡", search_files: "🔍", list_directory: "📁",
+    git_command: "🔀", glob_files: "🗂️",
+  };
+
+  const suggestions = [
+    "List all files in this project and explain the structure",
+    "Find all TODO comments in the codebase",
+    "Write a README for this project",
+    "Check git status and show recent commits",
+    "Find any syntax errors or obvious bugs",
+  ];
+
+  return (
+    <div className="flex flex-col h-full bg-black text-neutral-200 font-mono">
+      {/* Header */}
+      <div className="flex-shrink-0 px-4 py-3 border-b border-neutral-800 bg-neutral-950">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Terminal className="w-5 h-5 text-cyan-400" />
+            <span className="text-sm font-bold text-cyan-400">OpenClaw</span>
+            <span className="text-[10px] text-neutral-600 border border-neutral-800 px-1.5 py-0.5 rounded">local-first coding agent</span>
+          </div>
+          <div className="flex items-center gap-2">
+            {/* Model selector */}
+            <select value={model} onChange={e => setModel(e.target.value)}
+              className="bg-neutral-900 border border-neutral-800 text-xs text-neutral-300 rounded px-2 py-1 focus:outline-none focus:border-cyan-600">
+              {installed.length > 0
+                ? installed.map(m => <option key={m.name} value={m.name}>{m.name}{m.recommended ? " ⭐" : ""}</option>)
+                : <option value="qwen2.5-coder:7b">qwen2.5-coder:7b (not installed)</option>}
+            </select>
+            {/* CWD */}
+            <input value={cwd} onChange={e => setCwd(e.target.value)} placeholder="working dir"
+              className="bg-neutral-900 border border-neutral-800 text-xs text-neutral-500 rounded px-2 py-1 w-32 focus:outline-none focus:border-neutral-600" />
+          </div>
+        </div>
+      </div>
+
+      {/* Event stream */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+        {events.length === 0 && (
+          <div className="flex flex-col items-center justify-center h-full gap-6">
+            <div className="text-center">
+              <p className="text-4xl mb-3">🦅</p>
+              <p className="text-neutral-400 text-sm font-semibold">OpenClaw ready</p>
+              <p className="text-neutral-600 text-xs mt-1">Agentic coding powered by Ollama • {installed.length > 0 ? `${installed.length} models available` : "Pull a model to start"}</p>
+            </div>
+            {installed.length === 0 && (
+              <div className="bg-neutral-900 border border-amber-500/20 rounded-lg p-4 text-xs text-center max-w-sm">
+                <p className="text-amber-400 font-medium mb-2">No coding models installed</p>
+                <p className="text-neutral-500 mb-2">Go to Model Hub and pull:</p>
+                <code className="text-cyan-400">qwen2.5-coder:7b</code>
+              </div>
+            )}
+            <div className="grid grid-cols-1 gap-2 w-full max-w-lg">
+              {suggestions.map((s, i) => (
+                <button key={i} onClick={() => setTask(s)}
+                  className="text-left px-3 py-2 rounded-lg border border-neutral-800 hover:border-cyan-600/40 hover:bg-neutral-900 transition-all text-xs text-neutral-500 hover:text-neutral-300">
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {events.map((evt, i) => (
+          <div key={i}>
+            {evt.type === "user" && (
+              <div className="flex gap-2 mb-4">
+                <span className="text-neutral-600 flex-shrink-0">❯</span>
+                <span className="text-neutral-200 text-sm">{evt.content}</span>
+              </div>
+            )}
+
+            {evt.type === "tool_call" && (
+              <div className="flex items-center gap-2 text-xs py-1">
+                <span className="text-neutral-600">{TOOL_ICONS[evt.content?.tool] || "🔧"}</span>
+                <span className="text-cyan-600">{evt.content?.tool}</span>
+                <span className="text-neutral-700 truncate">
+                  {Object.entries(evt.content?.args || {}).map(([k,v]) =>
+                    `${k}=${JSON.stringify(v).slice(0,40)}`
+                  ).join(" ")}
+                </span>
+              </div>
+            )}
+
+            {evt.type === "tool_result" && (
+              <div className="ml-5 mb-2">
+                <div className="bg-neutral-950 border border-neutral-800 rounded px-3 py-2 text-[11px] text-neutral-500 font-mono max-h-32 overflow-y-auto">
+                  {String(evt.content?.result || "").slice(0, 600)}
+                </div>
+              </div>
+            )}
+
+            {evt.type === "stream" && (
+              <div className="text-sm text-neutral-300 leading-relaxed whitespace-pre-wrap">
+                {evt.content}
+                {running && i === events.length - 1 && (
+                  <span className="inline-block w-1.5 h-3.5 bg-cyan-400 ml-0.5 animate-pulse" />
+                )}
+              </div>
+            )}
+
+            {evt.type === "complete" && (
+              <div className="mt-2 text-[10px] text-neutral-700 flex items-center gap-2">
+                <span className="text-green-500">✓</span> Task complete
+              </div>
+            )}
+
+            {evt.type === "error" && (
+              <div className="bg-red-900/20 border border-red-500/20 rounded px-3 py-2 text-xs text-red-400">
+                {evt.content}
+              </div>
+            )}
+          </div>
+        ))}
+        <div ref={eventsEndRef} />
+      </div>
+
+      {/* Input */}
+      <div className="flex-shrink-0 p-3 border-t border-neutral-800 bg-neutral-950">
+        <div className="flex gap-2 items-end">
+          <div className="flex-1 relative">
+            <textarea
+              value={task}
+              onChange={e => setTask(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); run(); } }}
+              placeholder="Describe a coding task... (Enter to run, Shift+Enter for newline)"
+              rows={2}
+              className="w-full bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2.5 text-sm text-neutral-300 placeholder-neutral-700 focus:outline-none focus:border-cyan-600/50 resize-none font-mono"
+            />
+          </div>
+          {running ? (
+            <button onClick={() => abortRef.current?.abort()}
+              className="flex-shrink-0 px-4 py-2.5 rounded-lg bg-red-500/20 border border-red-500/40 text-red-400 text-xs hover:bg-red-500/30 transition-colors">
+              Stop
+            </button>
+          ) : (
+            <button onClick={run} disabled={!task.trim()}
+              className="flex-shrink-0 px-4 py-2.5 rounded-lg bg-cyan-500/20 border border-cyan-500/40 text-cyan-400 text-xs hover:bg-cyan-500/30 transition-colors disabled:opacity-30">
+              Run ⏎
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SettingsPage({ stats }: { stats: any }) {
   const [model, setModel] = useState(""); const [local, setLocal] = useState(false);
   const [providers, setProviders] = useState<CloudProvider[]>([]);

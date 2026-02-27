@@ -639,6 +639,125 @@ async def ws_endpoint(ws: WebSocket, conn_id: str):
     except WebSocketDisconnect:
         ws_clients.pop(conn_id, None)
 
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def _human_size(n: int) -> str:
+    for unit in ["B","KB","MB","GB"]:
+        if n < 1024: return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+
+# ════════════════════════════════════════════════════════════
+# OPENCLAW ENDPOINTS
+# ════════════════════════════════════════════════════════════
+
+class OpenClawRunReq(BaseModel):
+    task: str
+    model: Optional[str] = None
+    cwd: str = "."
+    session_id: Optional[str] = None
+    stream: bool = True
+
+# In-memory sessions (prod would use Redis)
+_openclaw_sessions: Dict[str, Any] = {}
+
+@app.post("/openclaw/run")
+async def openclaw_run(req: OpenClawRunReq):
+    """Run an OpenClaw agentic coding task with streaming SSE."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "openclaw"))
+    
+    try:
+        from openclaw.core import AgentSession, list_models as oc_list_models
+        from openclaw.config import detect_best_model
+    except ImportError:
+        async def err():
+            msg = json.dumps({"event_type":"error","content":"OpenClaw not installed. Run: pip install -e openclaw/"})
+            yield f"data: {msg}\n\n"
+        return EventSourceResponse(err())
+
+    sid = req.session_id or str(uuid.uuid4())
+    
+    # Resolve model
+    model = req.model
+    if not model:
+        available = await oc_list_models(OLLAMA_URL)
+        model = detect_best_model(available) or "qwen2.5-coder:7b"
+    
+    # Get or create session
+    if sid not in _openclaw_sessions:
+        cwd = str(Path(req.cwd).resolve()) if req.cwd != "." else os.getcwd()
+        _openclaw_sessions[sid] = AgentSession(model=model, cwd=cwd)
+    
+    session: AgentSession = _openclaw_sessions[sid]
+    session.model = model
+
+    async def stream_run():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_token(token: str):
+            queue.put_nowait({"event_type": "stream_token", "content": token, "session_id": sid})
+
+        def on_tool(name: str, args: dict, result):
+            if result is None:
+                queue.put_nowait({"event_type": "tool_call", "content": {"tool": name, "args": args}, "session_id": sid})
+            else:
+                queue.put_nowait({"event_type": "tool_result", "content": {"tool": name, "result": result[:500]}, "session_id": sid})
+
+        async def runner():
+            try:
+                result = await session.run(req.task, on_token=on_token, on_tool=on_tool)
+                queue.put_nowait({"event_type": "complete", "content": result, "session_id": sid})
+            except Exception as e:
+                queue.put_nowait({"event_type": "error", "content": str(e), "session_id": sid})
+            queue.put_nowait(None)  # sentinel
+
+        asyncio.create_task(runner())
+
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item)}\n\n"
+
+    return EventSourceResponse(stream_run())
+
+
+@app.get("/openclaw/sessions")
+async def list_openclaw_sessions():
+    return [{"session_id": sid, "model": s.model, "cwd": s.cwd, "turns": len(s.messages)//2}
+            for sid, s in _openclaw_sessions.items()]
+
+
+@app.delete("/openclaw/sessions/{session_id}")
+async def clear_openclaw_session(session_id: str):
+    if session_id in _openclaw_sessions:
+        del _openclaw_sessions[session_id]
+    return {"cleared": session_id}
+
+
+@app.get("/openclaw/models")
+async def openclaw_models():
+    """Models suitable for coding tasks."""
+    available = await ollama_models()
+    available_names = {m.get("name","") for m in available}
+    coding_priority = [
+        "qwen2.5-coder:32b","deepseek-coder-v2:16b","qwen2.5-coder:14b",
+        "deepseek-r1:14b","qwen2.5-coder:7b","deepseek-r1:8b","codestral:22b",
+        "llama3.3:70b","llama3.1:8b","phi4:latest","mistral:7b","llama3.2:latest",
+    ]
+    result = []
+    for m in coding_priority:
+        result.append({"name": m, "installed": m in available_names,
+                        "recommended": m in {"qwen2.5-coder:7b","qwen2.5-coder:14b","deepseek-r1:8b"}})
+    # Add any other installed models not in priority list
+    for m in available_names:
+        if not any(r["name"] == m for r in result):
+            result.append({"name": m, "installed": True, "recommended": False})
+    return result
+
 # ── Serve React frontend ───────────────────────────────────────────────────────
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
@@ -650,14 +769,6 @@ if FRONTEND_DIST.exists():
         if index.exists():
             return FileResponse(str(index))
         return HTMLResponse("<h1>AgentFlow v2</h1><p>Frontend not built. Run: cd frontend && npm run build</p>")
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-def _human_size(n: int) -> str:
-    for unit in ["B","KB","MB","GB"]:
-        if n < 1024: return f"{n:.1f}{unit}"
-        n /= 1024
-    return f"{n:.1f}TB"
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
