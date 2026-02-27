@@ -35,14 +35,61 @@ FRONTEND_DIST = HERE / "frontend" / "dist"
 from dotenv import load_dotenv
 load_dotenv(HERE / ".env")
 
-OLLAMA_URL     = os.getenv("OLLAMA_URL", "http://localhost:11434")
-ANTHROPIC_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
-OPENAI_KEY     = os.getenv("OPENAI_API_KEY", "")
-GROQ_KEY       = os.getenv("GROQ_API_KEY", "")
-GEMINI_KEY     = os.getenv("GEMINI_API_KEY", "")
-TOGETHER_KEY   = os.getenv("TOGETHER_API_KEY", "")
-MISTRAL_KEY    = os.getenv("MISTRAL_API_KEY", "")
-OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+ENV_FILE   = HERE / ".env"
+
+# ── Dynamic key store — reads from .env, can be updated at runtime ─────────────
+_KEY_NAMES = {
+    "anthropic":  "ANTHROPIC_API_KEY",
+    "openai":     "OPENAI_API_KEY",
+    "groq":       "GROQ_API_KEY",
+    "gemini":     "GEMINI_API_KEY",
+    "together":   "TOGETHER_API_KEY",
+    "mistral":    "MISTRAL_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+def _load_keys() -> Dict[str, str]:
+    """Load current API keys from env (re-reads .env each call so updates take effect)."""
+    load_dotenv(ENV_FILE, override=True)
+    return {pid: os.getenv(name, "") for pid, name in _KEY_NAMES.items()}
+
+def get_key(provider: str) -> str:
+    return _load_keys().get(provider, "")
+
+def _get_key_map() -> Dict[str, str]:
+    return _load_keys()
+
+# Keep backward compat aliases (resolved lazily)
+def _key(p): return get_key(p)
+ANTHROPIC_KEY  = property(lambda self: get_key("anthropic"))
+OPENAI_KEY     = property(lambda self: get_key("openai"))
+GROQ_KEY       = property(lambda self: get_key("groq"))
+GEMINI_KEY     = property(lambda self: get_key("gemini"))
+TOGETHER_KEY   = property(lambda self: get_key("together"))
+MISTRAL_KEY    = property(lambda self: get_key("mistral"))
+OPENROUTER_KEY = property(lambda self: get_key("openrouter"))
+
+def _write_env(updates: Dict[str, str]):
+    """Write / update keys in the .env file without destroying existing content."""
+    if ENV_FILE.exists():
+        lines = ENV_FILE.read_text().splitlines()
+    else:
+        lines = []
+
+    for env_var, value in updates.items():
+        found = False
+        for i, line in enumerate(lines):
+            if line.startswith(f"{env_var}=") or line.startswith(f"{env_var} ="):
+                lines[i] = f"{env_var}={value}"
+                found = True
+                break
+        if not found:
+            lines.append(f"{env_var}={value}")
+
+    ENV_FILE.write_text("\n".join(lines) + "\n")
+    # Reload into os.environ immediately
+    load_dotenv(ENV_FILE, override=True)
 
 # ── Ollama helpers ─────────────────────────────────────────────────────────────
 async def ollama_available() -> bool:
@@ -137,15 +184,8 @@ PROVIDER_META = {
     "openrouter": {"name":"OpenRouter",  "icon":"🔗","color":"from-slate-500 to-gray-500",    "docs":"https://openrouter.ai/docs",    "key_env":"OPENROUTER_API_KEY"},
 }
 
-KEY_MAP = {
-    "anthropic":  ANTHROPIC_KEY,
-    "openai":     OPENAI_KEY,
-    "groq":       GROQ_KEY,
-    "gemini":     GEMINI_KEY,
-    "together":   TOGETHER_KEY,
-    "mistral":    MISTRAL_KEY,
-    "openrouter": OPENROUTER_KEY,
-}
+# KEY_MAP is now always computed live via _get_key_map()
+KEY_MAP = _get_key_map()  # initial snapshot — use _get_key_map() for live values
 
 AGENT_TYPES = [
     {"id":"assistant",   "name":"Assistant",    "description":"General purpose: questions, explanations, analysis","type":"assistant",   "model":"auto","prefer_local":False,"tools":["web_search","knowledge_base_search"]},
@@ -173,46 +213,45 @@ def _detect_provider(model_id: str) -> Optional[str]:
     return None
 
 def _build_llm(model: str, temperature: float = 0.7, tools: list = None):
-    """Build an LLM that routes directly to the right provider."""
+    """Build an LLM that routes to the right provider using live API keys."""
     from langchain_openai import ChatOpenAI
-
+    keys = _get_key_map()  # always fresh
     provider = _detect_provider(model)
 
     if provider == "ollama":
-        model_name = model.replace("ollama/", "")
-        llm = ChatOpenAI(model=model_name, temperature=temperature, base_url=f"{OLLAMA_URL}/v1", api_key="ollama")
-
-    elif provider == "anthropic" and ANTHROPIC_KEY:
+        llm = ChatOpenAI(model=model.replace("ollama/",""), temperature=temperature,
+                         base_url=f"{OLLAMA_URL}/v1", api_key="ollama")
+    elif provider == "anthropic" and keys.get("anthropic"):
         try:
             from langchain_anthropic import ChatAnthropic
-            llm = ChatAnthropic(model=model, temperature=temperature, anthropic_api_key=ANTHROPIC_KEY)
+            llm = ChatAnthropic(model=model, temperature=temperature,
+                                anthropic_api_key=keys["anthropic"])
         except ImportError:
-            llm = ChatOpenAI(model=model, temperature=temperature, base_url="https://api.anthropic.com/v1", api_key=ANTHROPIC_KEY)
-
-    elif provider == "groq" and GROQ_KEY:
-        llm = ChatOpenAI(model=model, temperature=temperature, base_url="https://api.groq.com/openai/v1", api_key=GROQ_KEY)
-
-    elif provider == "together" and TOGETHER_KEY:
-        llm = ChatOpenAI(model=model, temperature=temperature, base_url="https://api.together.xyz/v1", api_key=TOGETHER_KEY)
-
-    elif provider == "mistral" and MISTRAL_KEY:
-        llm = ChatOpenAI(model=model, temperature=temperature, base_url="https://api.mistral.ai/v1", api_key=MISTRAL_KEY)
-
-    elif provider == "openai" and OPENAI_KEY:
-        llm = ChatOpenAI(model=model, temperature=temperature, api_key=OPENAI_KEY)
-
-    elif provider == "gemini" and GEMINI_KEY:
-        # Use via OpenAI-compat endpoint
+            llm = ChatOpenAI(model=model, temperature=temperature,
+                             base_url="https://api.anthropic.com/v1", api_key=keys["anthropic"])
+    elif provider == "groq" and keys.get("groq"):
+        llm = ChatOpenAI(model=model, temperature=temperature,
+                         base_url="https://api.groq.com/openai/v1", api_key=keys["groq"])
+    elif provider == "together" and keys.get("together"):
+        llm = ChatOpenAI(model=model, temperature=temperature,
+                         base_url="https://api.together.xyz/v1", api_key=keys["together"])
+    elif provider == "mistral" and keys.get("mistral"):
+        llm = ChatOpenAI(model=model, temperature=temperature,
+                         base_url="https://api.mistral.ai/v1", api_key=keys["mistral"])
+    elif provider == "openai" and keys.get("openai"):
+        llm = ChatOpenAI(model=model, temperature=temperature, api_key=keys["openai"])
+    elif provider == "gemini" and keys.get("gemini"):
         llm = ChatOpenAI(model=model, temperature=temperature,
                          base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                         api_key=GEMINI_KEY)
+                         api_key=keys["gemini"])
+    elif keys.get("openrouter"):
+        llm = ChatOpenAI(model=model, temperature=temperature,
+                         base_url="https://openrouter.ai/api/v1", api_key=keys["openrouter"])
     else:
-        # No key or unknown — try Ollama with whatever model string was given
-        llm = ChatOpenAI(model=model, temperature=temperature, base_url=f"{OLLAMA_URL}/v1", api_key="ollama")
-
-    if tools:
-        return llm.bind_tools(tools)
-    return llm
+        # Fallback to Ollama
+        llm = ChatOpenAI(model=model, temperature=temperature,
+                         base_url=f"{OLLAMA_URL}/v1", api_key="ollama")
+    return llm.bind_tools(tools) if tools else llm
 
 async def _run_agent_stream(model: str, task: str, agent_key: str, session_id: str) -> AsyncGenerator[str, None]:
     """Simple streaming agent runner — yields SSE data lines."""
@@ -255,7 +294,7 @@ async def _run_agent_stream(model: str, task: str, agent_key: str, session_id: s
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     online = await ollama_available()
-    cloud_keys = [k for k, v in KEY_MAP.items() if v]
+    cloud_keys = [k for k, v in _get_key_map().items() if v]
     logger.info("AgentFlow v2 starting",
                 ollama=online, cloud_providers=cloud_keys,
                 mode="hybrid" if cloud_keys else ("local" if online else "demo"))
@@ -291,7 +330,7 @@ class AddMCPReq(BaseModel):
 @app.get("/health")
 async def health():
     online = await ollama_available()
-    configured = [k for k, v in KEY_MAP.items() if v]
+    configured = [k for k, v in _get_key_map().items() if v]
     return {
         "status": "healthy", "version": "2.0.0",
         "agents": [a["id"] for a in AGENT_TYPES],
@@ -304,7 +343,7 @@ async def health():
 @app.get("/agents")
 async def list_agents():
     online = await ollama_available()
-    configured = [k for k, v in KEY_MAP.items() if v]
+    configured = [k for k, v in _get_key_map().items() if v]
     default_model = (
         await ollama_models()
     )
@@ -451,7 +490,7 @@ async def ollama_chat(req: dict):
 
 # ── Cloud providers ────────────────────────────────────────────────────────────
 def _configured(provider_id: str) -> bool:
-    return bool(KEY_MAP.get(provider_id))
+    return bool(_get_key_map().get(provider_id))
 
 @app.get("/cloud/providers")
 async def list_cloud_providers():
@@ -467,7 +506,7 @@ async def check_all_providers():
     """Ping each configured provider to validate keys."""
     results = {}
     async with httpx.AsyncClient(timeout=8.0) as client:
-        for pid, key in KEY_MAP.items():
+        for pid, key in _get_key_map().items():
             if not key:
                 results[pid] = {"configured": False, "healthy": False}
                 continue
@@ -505,7 +544,7 @@ async def check_single_provider(provider_id: str):
 
 @app.get("/cloud/models")
 async def list_cloud_models(provider: Optional[str] = Query(None), only_configured: bool = Query(False), category: Optional[str] = Query(None)):
-    configured = set(k for k, v in KEY_MAP.items() if v)
+    configured = set(k for k, v in _get_key_map().items() if v)
     models = CLOUD_CATALOG
     if provider:
         models = [m for m in models if m["provider"] == provider]
@@ -520,7 +559,7 @@ async def list_cloud_models(provider: Optional[str] = Query(None), only_configur
 
 @app.get("/cloud/routing")
 async def cloud_routing():
-    configured = set(k for k, v in KEY_MAP.items() if v)
+    configured = set(k for k, v in _get_key_map().items() if v)
     return {m["id"]: {"provider": m["provider"], "configured": m["provider"] in configured} for m in CLOUD_CATALOG}
 
 @app.post("/cloud/test")
@@ -535,7 +574,7 @@ async def test_cloud_model(model: str = Query(...), prompt: str = Query("Say hi 
 
 @app.get("/models/all")
 async def all_models():
-    configured = set(k for k, v in KEY_MAP.items() if v)
+    configured = set(k for k, v in _get_key_map().items() if v)
     raw = await ollama_models()
     local = [{"id": m.get("name",""), "name": m.get("name",""), "source": "ollama", "provider": "ollama",
               "provider_name": "Ollama", "provider_icon": "🦙", "provider_color": "from-green-500 to-teal-500",
@@ -598,7 +637,7 @@ async def kb_collections():
 @app.get("/stats")
 async def stats():
     online = await ollama_available()
-    configured = [k for k, v in KEY_MAP.items() if v]
+    configured = [k for k, v in _get_key_map().items() if v]
     return {"agents": {"count": len(AGENT_TYPES), "available": [a["id"] for a in AGENT_TYPES]},
             "ollama": {"healthy_hosts": 1 if online else 0, "total_hosts": 1, "total_models": len(await ollama_models())},
             "mcp": {"servers": len(_mcp_servers), "tools": 0},
@@ -648,6 +687,157 @@ def _human_size(n: int) -> str:
         n /= 1024
     return f"{n:.1f}TB"
 
+
+
+# ════════════════════════════════════════════════════════════
+# SETTINGS / API KEY MANAGEMENT ENDPOINTS
+# ════════════════════════════════════════════════════════════
+
+class SaveKeysReq(BaseModel):
+    keys: Dict[str, str]  # provider_id -> api_key value
+
+@app.get("/settings/keys")
+async def get_api_keys():
+    """Return current API keys — values masked for security."""
+    keys = _get_key_map()
+    result = {}
+    for pid, meta in PROVIDER_META.items():
+        raw = keys.get(pid, "")
+        result[pid] = {
+            "provider":    pid,
+            "name":        meta["name"],
+            "icon":        meta["icon"],
+            "color":       meta["color"],
+            "docs":        meta["docs"],
+            "env_var":     meta["key_env"],
+            "configured":  bool(raw),
+            "masked":      (raw[:8] + "..." + raw[-4:]) if len(raw) > 12 else ("*" * len(raw) if raw else ""),
+            "key_length":  len(raw),
+            "get_key_url": {
+                "anthropic":  "https://console.anthropic.com/settings/keys",
+                "openai":     "https://platform.openai.com/api-keys",
+                "groq":       "https://console.groq.com/keys",
+                "gemini":     "https://aistudio.google.com/app/apikey",
+                "together":   "https://api.together.xyz/settings/api-keys",
+                "mistral":    "https://console.mistral.ai/api-keys/",
+                "openrouter": "https://openrouter.ai/settings/keys",
+            }.get(pid, "#"),
+            "free_tier": pid in ("groq", "gemini", "together", "openrouter"),
+            "description": {
+                "anthropic":  "Claude models — Opus, Sonnet, Haiku",
+                "openai":     "GPT-4o, o4-mini and all OpenAI models",
+                "groq":       "Llama, DeepSeek at blazing speed — FREE tier",
+                "gemini":     "Gemini 2.0 Flash, 1.5 Pro — FREE tier",
+                "together":   "100+ open models at low cost — FREE $25 credit",
+                "mistral":    "Mistral Large, Codestral",
+                "openrouter": "300+ models from one key — FREE tier",
+            }.get(pid, ""),
+        }
+    return result
+
+@app.post("/settings/keys")
+async def save_api_keys(req: SaveKeysReq):
+    """Save one or more API keys to .env and reload immediately."""
+    updates = {}
+    saved = []
+    for provider_id, key_value in req.keys.items():
+        if provider_id not in _KEY_NAMES:
+            continue
+        env_var = _KEY_NAMES[provider_id]
+        updates[env_var] = key_value.strip()
+        saved.append(provider_id)
+
+    if updates:
+        _write_env(updates)
+
+    # Return updated status
+    keys = _get_key_map()
+    return {
+        "saved": saved,
+        "configured": [k for k, v in keys.items() if v],
+        "message": f"Saved {len(saved)} key(s). Active immediately — no restart needed.",
+    }
+
+@app.delete("/settings/keys/{provider_id}")
+async def delete_api_key(provider_id: str):
+    """Remove an API key."""
+    if provider_id not in _KEY_NAMES:
+        raise HTTPException(404, f"Unknown provider: {provider_id}")
+    _write_env({_KEY_NAMES[provider_id]: ""})
+    return {"deleted": provider_id, "message": "Key removed."}
+
+@app.post("/settings/keys/{provider_id}/test")
+async def test_api_key(provider_id: str):
+    """Test an API key by making a minimal real request."""
+    key = get_key(provider_id)
+    if not key:
+        return {"provider": provider_id, "success": False, "error": "No key configured",
+                "latency_ms": 0}
+
+    start = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            test_configs = {
+                "anthropic":  dict(method="POST", url="https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json={"model": "claude-haiku-4-5-20251001", "max_tokens": 5, "messages": [{"role":"user","content":"hi"}]}),
+                "openai":     dict(method="GET",  url="https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {key}"}),
+                "groq":       dict(method="GET",  url="https://api.groq.com/openai/v1/models",
+                    headers={"Authorization": f"Bearer {key}"}),
+                "gemini":     dict(method="GET",  url=f"https://generativelanguage.googleapis.com/v1beta/models?key={key}",
+                    headers={}),
+                "together":   dict(method="GET",  url="https://api.together.xyz/v1/models",
+                    headers={"Authorization": f"Bearer {key}"}),
+                "mistral":    dict(method="GET",  url="https://api.mistral.ai/v1/models",
+                    headers={"Authorization": f"Bearer {key}"}),
+                "openrouter": dict(method="GET",  url="https://openrouter.ai/api/v1/models",
+                    headers={"Authorization": f"Bearer {key}"}),
+            }
+            cfg = test_configs.get(provider_id)
+            if not cfg:
+                return {"provider": provider_id, "success": False, "error": "No test available"}
+            method = cfg.pop("method")
+            if method == "GET":
+                r = await c.get(**cfg)
+            else:
+                r = await c.post(**cfg)
+            latency = round((time.time()-start)*1000, 1)
+            ok = r.status_code in (200, 400)  # 400 = key valid, bad request params
+            err_msg = None
+            if not ok:
+                try:
+                    body = r.json()
+                    err_msg = body.get("error", {}).get("message") or body.get("detail") or str(r.status_code)
+                except Exception:
+                    err_msg = f"HTTP {r.status_code}"
+            return {"provider": provider_id, "success": ok, "latency_ms": latency,
+                    "error": err_msg, "status_code": r.status_code}
+    except Exception as e:
+        latency = round((time.time()-start)*1000, 1)
+        return {"provider": provider_id, "success": False, "error": str(e), "latency_ms": latency}
+
+@app.get("/settings/ollama")
+async def get_ollama_settings():
+    return {"url": OLLAMA_URL, "available": await ollama_available(),
+            "models": await ollama_models()}
+
+@app.post("/settings/ollama")
+async def save_ollama_settings(url: str = Query(...)):
+    """Update Ollama URL (writes to .env)."""
+    _write_env({"OLLAMA_URL": url})
+    # Update in-process too
+    import os as _os
+    _os.environ["OLLAMA_URL"] = url
+    global OLLAMA_URL
+    OLLAMA_URL = url
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{url}/api/tags")
+            available = r.status_code == 200
+    except Exception:
+        available = False
+    return {"saved": True, "url": url, "available": available}
 
 # ════════════════════════════════════════════════════════════
 # OPENCLAW ENDPOINTS

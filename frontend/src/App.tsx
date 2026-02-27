@@ -1330,124 +1330,266 @@ function OpenClawPage() {
 
 
 function SettingsPage({ stats }: { stats: any }) {
-  const [model, setModel] = useState(""); const [local, setLocal] = useState(false);
-  const [providers, setProviders] = useState<CloudProvider[]>([]);
-  const [checking, setChecking] = useState(false);
+  const [keys, setKeys] = useState<Record<string, any>>({});
+  const [editing, setEditing] = useState<Record<string, string>>({});
+  const [testing, setTesting] = useState<Record<string, boolean>>({});
+  const [testResults, setTestResults] = useState<Record<string, any>>({});
+  const [saving, setSaving] = useState(false);
+  const [ollamaUrl, setOllamaUrl] = useState("");
+  const [ollamaStatus, setOllamaStatus] = useState<any>(null);
+  const [showKey, setShowKey] = useState<Record<string, boolean>>({});
 
-  useEffect(() => {
-    apiFetch("/cloud/providers").then(setProviders).catch(() => {});
-  }, []);
-
-  const checkAll = async () => {
-    setChecking(true);
+  const load = async () => {
     try {
-      await apiFetch("/cloud/providers/check", { method: "POST" });
-      const p = await apiFetch("/cloud/providers");
-      setProviders(p);
-      toast.success("Provider check complete");
-    } catch (e: any) { toast.error(e.message); }
-    finally { setChecking(false); }
+      const data = await apiFetch("/settings/keys");
+      setKeys(data);
+      // Pre-fill editing state with empty strings
+      const edits: Record<string, string> = {};
+      Object.keys(data).forEach(k => { edits[k] = ""; });
+      setEditing(edits);
+    } catch {}
+    try {
+      const o = await apiFetch("/settings/ollama");
+      setOllamaUrl(o.url || "http://localhost:11434");
+      setOllamaStatus(o);
+    } catch {}
   };
 
-  const switchAll = async () => {
-    if (!model) return;
-    try { await apiFetch("/agents/switch-model", { method: "POST", body: JSON.stringify({ model, prefer_local: local }) }); toast.success(`All agents → ${model}`); }
-    catch (e: any) { toast.error(e.message); }
+  useEffect(() => { load(); }, []);
+
+  const saveKey = async (providerId: string) => {
+    const val = editing[providerId]?.trim();
+    if (!val) return;
+    setSaving(true);
+    try {
+      await apiFetch("/settings/keys", {
+        method: "POST",
+        body: JSON.stringify({ keys: { [providerId]: val } }),
+      });
+      setEditing(prev => ({ ...prev, [providerId]: "" }));
+      await load();
+      toast.success(`${keys[providerId]?.name || providerId} key saved!`);
+    } catch (e: any) {
+      toast.error(e.message || "Failed to save key");
+    } finally { setSaving(false); }
   };
-  const services = [
-    { name: "AgentFlow API", url: "http://localhost:8000/docs" },
-    { name: "Langfuse", url: "http://localhost:3001" },
-    { name: "Temporal UI", url: "http://localhost:8080" },
-    { name: "LiteLLM", url: "http://localhost:4000" },
-    { name: "Open WebUI", url: "http://localhost:8888" },
-    { name: "Qdrant", url: "http://localhost:6333/dashboard" },
-  ];
+
+  const removeKey = async (providerId: string) => {
+    try {
+      await apiFetch(`/settings/keys/${providerId}`, { method: "DELETE" });
+      await load();
+      toast.success("Key removed");
+    } catch {}
+  };
+
+  const testKey = async (providerId: string) => {
+    setTesting(prev => ({ ...prev, [providerId]: true }));
+    setTestResults(prev => ({ ...prev, [providerId]: null }));
+    try {
+      const r = await apiFetch(`/settings/keys/${providerId}/test`, { method: "POST" });
+      setTestResults(prev => ({ ...prev, [providerId]: r }));
+    } catch (e: any) {
+      setTestResults(prev => ({ ...prev, [providerId]: { success: false, error: e.message } }));
+    } finally { setTesting(prev => ({ ...prev, [providerId]: false })); }
+  };
+
+  const saveOllama = async () => {
+    try {
+      await apiFetch(`/settings/ollama?url=${encodeURIComponent(ollamaUrl)}`, { method: "POST" });
+      const o = await apiFetch("/settings/ollama");
+      setOllamaStatus(o);
+      toast.success("Ollama URL saved");
+    } catch {}
+  };
+
+  const providers = Object.values(keys);
+  const configured = providers.filter((p: any) => p.configured);
+
   return (
-    <div className="flex-1 overflow-y-auto p-6">
-      <div className="max-w-xl mx-auto space-y-6">
-        <h2 className="text-sm font-semibold text-white">Settings</h2>
-        <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-          <p className="text-xs font-medium text-neutral-500 mb-3 uppercase tracking-wider">Platform Mode</p>
-          <div className="flex items-center gap-3 mb-1"><div className={cx("w-2.5 h-2.5 rounded-full", stats?.mode === "hybrid" ? "bg-blue-400" : "bg-green-400")} /><p className="text-sm font-medium text-neutral-200 capitalize">{stats?.mode || "local"} Mode</p></div>
-          <p className="text-xs text-neutral-600">{stats?.mode === "hybrid" ? "Cloud + local via LiteLLM" : "100% local — Ollama only, no API keys needed"}</p>
+    <div className="flex-1 overflow-y-auto bg-neutral-950">
+      <div className="max-w-3xl mx-auto px-6 py-8 space-y-8">
+
+        {/* Header */}
+        <div>
+          <h1 className="text-xl font-bold text-white">Settings</h1>
+          <p className="text-neutral-500 text-sm mt-1">
+            Configure API keys and connections. Keys are saved to <code className="text-neutral-400 bg-neutral-900 px-1 rounded">.env</code> and take effect immediately — no restart needed.
+          </p>
         </div>
-        <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-          <p className="text-xs font-medium text-neutral-500 mb-3 uppercase tracking-wider">Switch All Agents</p>
-          <input value={model} onChange={e => setModel(e.target.value)} placeholder="e.g. llama3.1:8b or claude-sonnet-4-6" className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-600 focus:outline-none mb-3" />
-          <div className="flex items-center gap-2 mb-3"><Toggle on={local} onChange={setLocal} /><span className="text-xs text-neutral-500">Use Ollama (local)</span></div>
-          <button onClick={switchAll} className="px-4 py-2 rounded-lg bg-neutral-700 hover:bg-neutral-600 text-sm text-white transition-colors">Switch All</button>
+
+        {/* Status banner */}
+        <div className="grid grid-cols-3 gap-3">
+          {[
+            { label: "Local (Ollama)", value: stats?.ollama?.healthy_hosts > 0 ? "Connected" : "Offline", ok: stats?.ollama?.healthy_hosts > 0, icon: "🦙" },
+            { label: "Cloud Providers", value: `${configured.length} / ${providers.length} active`, ok: configured.length > 0, icon: "☁️" },
+            { label: "Mode", value: stats?.mode || "demo", ok: stats?.mode !== "demo", icon: "⚡" },
+          ].map(item => (
+            <div key={item.label} className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-1">
+                <span>{item.icon}</span>
+                <span className="text-xs text-neutral-500">{item.label}</span>
+              </div>
+              <div className={cx("text-sm font-semibold", item.ok ? "text-green-400" : "text-neutral-500")}>
+                {item.value}
+              </div>
+            </div>
+          ))}
         </div>
-        {stats?.ollama && (
-          <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-            <p className="text-xs font-medium text-neutral-500 mb-3 uppercase tracking-wider">Ollama</p>
-            <div className="grid grid-cols-3 gap-3">
-              {[{label:"Hosts",value:stats.ollama.total_hosts},{label:"Healthy",value:stats.ollama.healthy_hosts},{label:"Models",value:stats.ollama.total_models}].map(s => (
-                <div key={s.label} className="text-center p-2 rounded-lg bg-neutral-800"><p className="text-xl font-bold text-white">{s.value}</p><p className="text-xs text-neutral-600">{s.label}</p></div>
-              ))}
+
+        {/* Ollama config */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5">
+          <div className="flex items-center gap-3 mb-4">
+            <span className="text-2xl">🦙</span>
+            <div>
+              <h2 className="text-sm font-semibold text-white">Ollama (Local Models)</h2>
+              <p className="text-xs text-neutral-500">Free, private, runs on your machine</p>
+            </div>
+            <div className={cx("ml-auto flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border",
+              ollamaStatus?.available
+                ? "text-green-400 border-green-500/30 bg-green-500/10"
+                : "text-neutral-500 border-neutral-700 bg-neutral-800")}>
+              <div className={cx("w-1.5 h-1.5 rounded-full", ollamaStatus?.available ? "bg-green-400" : "bg-neutral-600")} />
+              {ollamaStatus?.available ? `${ollamaStatus.models?.length || 0} models` : "Offline"}
             </div>
           </div>
-        )}
-        {/* Cloud providers */}
-        <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-          <div className="flex items-center justify-between mb-3">
-            <p className="text-xs font-medium text-neutral-500 uppercase tracking-wider">Cloud Providers</p>
-            <button onClick={checkAll} disabled={checking}
-              className="flex items-center gap-1.5 text-xs text-neutral-500 hover:text-neutral-300 transition-colors">
-              {checking ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-              Test keys
+          <div className="flex gap-2">
+            <input value={ollamaUrl} onChange={e => setOllamaUrl(e.target.value)}
+              placeholder="http://localhost:11434"
+              className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 focus:outline-none focus:border-cyan-600 font-mono" />
+            <button onClick={saveOllama}
+              className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm rounded-lg transition-colors">
+              Save
             </button>
           </div>
-          <div className="space-y-1.5">
-            {providers.map(p => (
-              <div key={p.id} className="flex items-center gap-3 py-1.5">
-                <span className="text-base w-6 text-center flex-shrink-0">{p.icon}</span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-neutral-300">{p.name}</p>
-                  <p className="text-[10px] font-mono text-neutral-600">{p.id.toUpperCase()}_API_KEY</p>
-                </div>
-                <div className="flex-shrink-0">
-                  {p.configured ? (
-                    p.healthy === null ? (
-                      <span className="text-[10px] px-2 py-0.5 rounded bg-neutral-800 text-neutral-500">unchecked</span>
-                    ) : p.healthy ? (
-                      <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20">
-                        <span className="w-1.5 h-1.5 rounded-full bg-green-400" /> valid
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-red-500/10 text-red-400 border border-red-500/20">
-                        <span className="w-1.5 h-1.5 rounded-full bg-red-500" /> invalid
-                      </span>
-                    )
-                  ) : (
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 border border-amber-500/20">not set</span>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-          <p className="text-[10px] text-neutral-700 mt-3">Set keys in <code className="text-neutral-600">.env</code> and restart to enable cloud models</p>
+          {ollamaStatus?.available && ollamaStatus.models?.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {ollamaStatus.models.slice(0, 8).map((m: any) => (
+                <span key={m.name} className="text-[10px] bg-neutral-800 text-neutral-400 px-2 py-0.5 rounded-full border border-neutral-700">
+                  {m.name}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
-        <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-          <p className="text-xs font-medium text-neutral-500 mb-3 uppercase tracking-wider">Services</p>
-          <div className="space-y-1">
-            {services.map(s => (
-              <a key={s.name} href={s.url} target="_blank" rel="noopener noreferrer"
-                className="flex items-center gap-3 py-2 px-2 -mx-2 hover:bg-neutral-800 rounded-lg transition-colors group">
-                <div className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0" />
-                <p className="text-sm text-neutral-400 group-hover:text-neutral-200 transition-colors flex-1">{s.name}</p>
-                <p className="text-xs text-neutral-700 font-mono">{s.url.replace("http://localhost:", ":")}</p>
-                <ArrowRight className="w-3 h-3 text-neutral-700 group-hover:text-neutral-500" />
-              </a>
-            ))}
+        {/* Cloud API Keys */}
+        <div>
+          <h2 className="text-sm font-semibold text-white mb-3">Cloud API Keys</h2>
+          <div className="space-y-3">
+            {Object.entries(keys).map(([pid, info]: [string, any]) => {
+              const testResult = testResults[pid];
+              const isTesting = testing[pid];
+              const editVal = editing[pid] || "";
+
+              return (
+                <div key={pid} className={cx(
+                  "bg-neutral-900 border rounded-xl p-5 transition-colors",
+                  info.configured ? "border-neutral-700" : "border-neutral-800"
+                )}>
+                  <div className="flex items-start gap-3">
+                    {/* Icon + name */}
+                    <div className="flex-shrink-0 mt-0.5">
+                      <span className="text-2xl">{info.icon}</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span className="text-sm font-semibold text-white">{info.name}</span>
+                        {info.free_tier && (
+                          <span className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 py-0.5 rounded-full">
+                            FREE tier
+                          </span>
+                        )}
+                        {info.configured && (
+                          <span className="text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 px-1.5 py-0.5 rounded-full">
+                            ✓ configured
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-neutral-500 mb-3">{info.description}</p>
+
+                      {/* Current key display */}
+                      {info.configured && (
+                        <div className="flex items-center gap-2 mb-3">
+                          <code className="text-xs text-neutral-400 bg-neutral-800 px-2 py-1 rounded font-mono">
+                            {showKey[pid] ? "••••••••••••" : info.masked}
+                          </code>
+                          <span className="text-[10px] text-neutral-600">{info.key_length} chars</span>
+
+                          {/* Test result */}
+                          {testResult && (
+                            <span className={cx("text-[10px] px-2 py-0.5 rounded-full",
+                              testResult.success
+                                ? "bg-green-500/10 text-green-400"
+                                : "bg-red-500/10 text-red-400")}>
+                              {testResult.success ? `✓ ${testResult.latency_ms}ms` : `✗ ${testResult.error?.slice(0,40)}`}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Input + actions */}
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          value={editVal}
+                          onChange={e => setEditing(prev => ({ ...prev, [pid]: e.target.value }))}
+                          onKeyDown={e => e.key === "Enter" && saveKey(pid)}
+                          placeholder={info.configured ? "Enter new key to replace…" : `Paste your ${info.name} API key…`}
+                          className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-700 focus:outline-none focus:border-cyan-600 font-mono"
+                        />
+                        <button onClick={() => saveKey(pid)}
+                          disabled={!editVal.trim() || saving}
+                          className="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs rounded-lg transition-colors whitespace-nowrap">
+                          {saving ? "…" : "Save"}
+                        </button>
+                        {info.configured && (
+                          <>
+                            <button onClick={() => testKey(pid)} disabled={isTesting}
+                              className="px-3 py-2 bg-neutral-700 hover:bg-neutral-600 disabled:opacity-30 text-neutral-300 text-xs rounded-lg transition-colors whitespace-nowrap">
+                              {isTesting ? "Testing…" : "Test"}
+                            </button>
+                            <button onClick={() => removeKey(pid)}
+                              className="px-3 py-2 bg-red-900/30 hover:bg-red-900/50 border border-red-700/30 text-red-400 text-xs rounded-lg transition-colors">
+                              Remove
+                            </button>
+                          </>
+                        )}
+                      </div>
+
+                      {/* Get key link */}
+                      <div className="mt-2 flex items-center gap-3">
+                        <a href={info.get_key_url} target="_blank" rel="noreferrer"
+                          className="text-[11px] text-cyan-700 hover:text-cyan-500 transition-colors">
+                          Get API key →
+                        </a>
+                        <a href={info.docs} target="_blank" rel="noreferrer"
+                          className="text-[11px] text-neutral-700 hover:text-neutral-500 transition-colors">
+                          Docs
+                        </a>
+                        <span className="text-[10px] text-neutral-700 font-mono">{info.env_var}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
+
+        {/* .env location hint */}
+        <div className="bg-neutral-900/50 border border-neutral-800 rounded-xl p-4">
+          <p className="text-xs text-neutral-600">
+            Keys are stored in <code className="text-neutral-500">{`/opt/agentflow/.env`}</code> on your server. You can also edit this file directly and the server will pick up changes on next request.
+          </p>
+        </div>
+
       </div>
     </div>
   );
 }
 
-// Root App
+
+
 export default function App() {
   const [page, setPage] = useState<Page>("chat");
   const [agents, setAgents] = useState<AgentInfo[]>([]);
