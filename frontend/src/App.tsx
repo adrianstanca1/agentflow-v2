@@ -1370,6 +1370,631 @@ function OpenClawPage() {
 
 
 
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SETTINGS PAGE — Production-grade setup wizard
+// ══════════════════════════════════════════════════════════════════════════════
+
+type ProviderCard = {
+  id: string; name: string; icon: string; configured: boolean;
+  masked: string; key_length: number; description: string;
+  free_tier: boolean; get_key_url: string; docs: string;
+  env_var: string; auth_method?: string; oauth_email?: string; oauth_name?: string;
+};
+
+function SetupWizard({ onDone }: { onDone: () => void }) {
+  const [step, setStep] = useState(0);
+  const steps = ["Welcome", "Ollama", "Cloud APIs", "Test & Launch"];
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="bg-[#0d0d0f] border border-white/10 rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden">
+        {/* Progress bar */}
+        <div className="h-0.5 bg-white/5">
+          <div className="h-full bg-gradient-to-r from-cyan-500 to-violet-500 transition-all duration-500"
+               style={{ width: `${((step + 1) / steps.length) * 100}%` }} />
+        </div>
+        {/* Step indicators */}
+        <div className="flex items-center gap-0 px-8 pt-6 pb-2">
+          {steps.map((s, i) => (
+            <div key={s} className="flex items-center gap-0 flex-1 last:flex-none">
+              <div className={cx("flex items-center gap-2", i < steps.length - 1 ? "flex-1" : "")}>
+                <div className={cx(
+                  "w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 transition-colors",
+                  i < step ? "bg-cyan-500 text-black" :
+                  i === step ? "bg-white/10 text-white border border-white/20" :
+                  "bg-white/5 text-white/30"
+                )}>
+                  {i < step ? "✓" : i + 1}
+                </div>
+                <span className={cx("text-xs transition-colors whitespace-nowrap",
+                  i === step ? "text-white" : i < step ? "text-cyan-400" : "text-white/30")}>
+                  {s}
+                </span>
+                {i < steps.length - 1 && (
+                  <div className={cx("h-px flex-1 mx-3 transition-colors",
+                    i < step ? "bg-cyan-500/50" : "bg-white/10")} />
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Step content */}
+        <div className="px-8 py-6">
+          {step === 0 && <WizardWelcome onNext={() => setStep(1)} />}
+          {step === 1 && <WizardOllama onNext={() => setStep(2)} onBack={() => setStep(0)} />}
+          {step === 2 && <WizardCloudAPIs onNext={() => setStep(3)} onBack={() => setStep(1)} />}
+          {step === 3 && <WizardLaunch onDone={onDone} onBack={() => setStep(2)} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WizardWelcome({ onNext }: { onNext: () => void }) {
+  return (
+    <div className="text-center py-4">
+      <div className="text-5xl mb-4">🚀</div>
+      <h2 className="text-2xl font-bold text-white mb-2">Welcome to AgentFlow</h2>
+      <p className="text-neutral-400 text-sm max-w-md mx-auto mb-8">
+        Let's connect your AI providers. This takes about 2 minutes. You can always change these in Settings later.
+      </p>
+      <div className="grid grid-cols-3 gap-3 mb-8 text-left">
+        {[
+          { icon: "🦙", label: "Ollama", desc: "Local models, zero cost" },
+          { icon: "☁️", label: "Cloud APIs", desc: "Groq, OpenAI, Gemini, more" },
+          { icon: "⚡", label: "One config", desc: "All agents share your keys" },
+        ].map(item => (
+          <div key={item.label} className="bg-white/5 rounded-xl p-4 border border-white/10">
+            <div className="text-2xl mb-2">{item.icon}</div>
+            <div className="text-sm font-medium text-white">{item.label}</div>
+            <div className="text-xs text-neutral-500 mt-0.5">{item.desc}</div>
+          </div>
+        ))}
+      </div>
+      <button onClick={onNext}
+        className="px-8 py-3 bg-gradient-to-r from-cyan-500 to-violet-500 text-white font-semibold rounded-xl hover:opacity-90 transition-opacity">
+        Get Started →
+      </button>
+    </div>
+  );
+}
+
+function WizardOllama({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
+  const [url, setUrl] = useState("http://localhost:11434");
+  const [key, setKey] = useState("");
+  const [status, setStatus] = useState<any>(null);
+  const [testing, setTesting] = useState(false);
+
+  const test = async () => {
+    setTesting(true); setStatus(null);
+    try {
+      const r = await apiFetch(`/settings/ollama?url=${encodeURIComponent(url)}&api_key=${encodeURIComponent(key)}`, { method: "POST" });
+      setStatus(r);
+    } catch { setStatus({ available: false, error: "Connection failed" }); }
+    setTesting(false);
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-6">
+        <span className="text-3xl">🦙</span>
+        <div>
+          <h3 className="text-lg font-bold text-white">Ollama — Local Models</h3>
+          <p className="text-sm text-neutral-400">Free, private, runs on your machine or a remote server</p>
+        </div>
+      </div>
+      <div className="space-y-3 mb-6">
+        <div>
+          <label className="text-xs text-neutral-500 mb-1 block">Ollama URL</label>
+          <input value={url} onChange={e => setUrl(e.target.value)}
+            placeholder="http://localhost:11434"
+            className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-white/20 focus:outline-none focus:border-cyan-500/50 font-mono" />
+        </div>
+        <div>
+          <label className="text-xs text-neutral-500 mb-1 block">API Key <span className="text-white/20">(optional — only for secured endpoints)</span></label>
+          <input type="password" value={key} onChange={e => setKey(e.target.value)}
+            placeholder="Bearer token if your Ollama is behind auth"
+            className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-white/20 focus:outline-none focus:border-cyan-500/50 font-mono" />
+        </div>
+        <button onClick={test} disabled={testing}
+          className="w-full py-2.5 bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl text-sm text-white transition-colors disabled:opacity-50">
+          {testing ? "Testing…" : "Test Connection"}
+        </button>
+        {status && (
+          <div className={cx("rounded-xl px-4 py-3 text-sm flex items-center gap-3",
+            status.available ? "bg-green-500/10 border border-green-500/20 text-green-300"
+                             : "bg-amber-500/10 border border-amber-500/20 text-amber-300")}>
+            <span>{status.available ? "✓" : "○"}</span>
+            <span>{status.available
+              ? `Connected — ${status.model_count} models available`
+              : `Not reachable — ${status.error || "Ollama may not be running"}`}
+            </span>
+          </div>
+        )}
+      </div>
+      <div className="flex gap-3">
+        <button onClick={onBack} className="px-4 py-2.5 bg-white/5 text-white/50 rounded-xl text-sm hover:text-white transition-colors">← Back</button>
+        <button onClick={onNext} className="flex-1 py-2.5 bg-gradient-to-r from-cyan-500 to-violet-500 text-white font-semibold rounded-xl hover:opacity-90 transition-opacity">
+          {status?.available ? "Continue →" : "Skip for now →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function WizardCloudAPIs({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
+  const [saved, setSaved] = useState<Record<string, boolean>>({});
+  const [inputs, setInputs] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+
+  const providers = [
+    { id: "groq", icon: "⚡", name: "Groq", tag: "FREE · Fastest", color: "text-yellow-400", desc: "Llama 3.3 70B at 500 tok/s", url: "https://console.groq.com/keys", placeholder: "gsk_..." },
+    { id: "gemini", icon: "🔵", name: "Google Gemini", tag: "FREE tier", color: "text-blue-400", desc: "Gemini 2.0 Flash", url: "https://aistudio.google.com/app/apikey", placeholder: "AIza..." },
+    { id: "openai", icon: "🟢", name: "OpenAI", tag: "Pay-per-use", color: "text-green-400", desc: "GPT-4o, o4-mini", url: "https://platform.openai.com/api-keys", placeholder: "sk-..." },
+    { id: "anthropic", icon: "🟠", name: "Anthropic", tag: "Pay-per-use", color: "text-orange-400", desc: "Claude Sonnet, Haiku", url: "https://console.anthropic.com/settings/keys", placeholder: "sk-ant-..." },
+    { id: "together", icon: "🟣", name: "Together AI", tag: "FREE $25 credit", color: "text-violet-400", desc: "100+ open models", url: "https://api.together.xyz/settings/api-keys", placeholder: "..." },
+    { id: "openrouter", icon: "🔗", name: "OpenRouter", tag: "FREE tier", color: "text-slate-400", desc: "300+ models, one key", url: "https://openrouter.ai/settings/keys", placeholder: "sk-or-..." },
+  ];
+
+  const save = async (id: string) => {
+    const val = inputs[id]?.trim();
+    if (!val) return;
+    setSaving(id);
+    try {
+      await apiFetch("/settings/keys", { method: "POST", body: JSON.stringify({ keys: { [id]: val } }) });
+      setSaved(p => ({ ...p, [id]: true }));
+      setInputs(p => ({ ...p, [id]: "" }));
+    } catch { }
+    setSaving(null);
+  };
+
+  return (
+    <div>
+      <div className="mb-5">
+        <h3 className="text-lg font-bold text-white">Cloud API Keys</h3>
+        <p className="text-sm text-neutral-400 mt-0.5">Add at least one to start. All are optional — add more any time in Settings.</p>
+      </div>
+      <div className="space-y-2 mb-6 max-h-72 overflow-y-auto pr-1">
+        {providers.map(p => (
+          <div key={p.id} className={cx(
+            "rounded-xl border p-3 transition-colors",
+            saved[p.id] ? "bg-green-500/5 border-green-500/20" : "bg-white/3 border-white/8"
+          )}>
+            <div className="flex items-center gap-3">
+              <span className="text-xl">{p.icon}</span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-white">{p.name}</span>
+                  <span className={cx("text-[10px] font-mono", p.color)}>{p.tag}</span>
+                  {saved[p.id] && <span className="text-[10px] text-green-400">✓ saved</span>}
+                </div>
+                <span className="text-xs text-neutral-500">{p.desc}</span>
+              </div>
+              <a href={p.url} target="_blank" rel="noreferrer"
+                className="text-[10px] text-cyan-600 hover:text-cyan-400 whitespace-nowrap">
+                Get key →
+              </a>
+            </div>
+            {!saved[p.id] && (
+              <div className="flex gap-2 mt-2">
+                <input type="password"
+                  value={inputs[p.id] || ""}
+                  onChange={e => setInputs(prev => ({ ...prev, [p.id]: e.target.value }))}
+                  onKeyDown={e => e.key === "Enter" && save(p.id)}
+                  placeholder={p.placeholder}
+                  className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-white/20 focus:outline-none focus:border-cyan-500/50 font-mono" />
+                <button onClick={() => save(p.id)}
+                  disabled={!inputs[p.id]?.trim() || saving === p.id}
+                  className="px-3 py-1.5 bg-white/10 hover:bg-white/15 disabled:opacity-30 text-white text-xs rounded-lg transition-colors">
+                  {saving === p.id ? "…" : "Save"}
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      <div className="flex gap-3">
+        <button onClick={onBack} className="px-4 py-2.5 bg-white/5 text-white/50 rounded-xl text-sm hover:text-white transition-colors">← Back</button>
+        <button onClick={onNext} className="flex-1 py-2.5 bg-gradient-to-r from-cyan-500 to-violet-500 text-white font-semibold rounded-xl hover:opacity-90 transition-opacity">
+          {Object.keys(saved).length > 0 ? `Continue with ${Object.keys(saved).length} provider${Object.keys(saved).length > 1 ? "s" : ""} →` : "Skip for now →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function WizardLaunch({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
+  const [results, setResults] = useState<Record<string, any>>({});
+  const [testing, setTesting] = useState(false);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => { runTests(); }, []);
+
+  const runTests = async () => {
+    setTesting(true);
+    try {
+      const r = await apiFetch("/cloud/providers/check");
+      setResults(r);
+    } catch { }
+    setTesting(false);
+    setDone(true);
+  };
+
+  const passed = Object.values(results).filter((r: any) => r.configured && r.healthy).length;
+  const total = Object.values(results).filter((r: any) => r.configured).length;
+
+  return (
+    <div className="text-center">
+      <div className="text-5xl mb-4">{done ? (passed > 0 ? "🎉" : "🔧") : "⏳"}</div>
+      <h3 className="text-lg font-bold text-white mb-1">
+        {testing ? "Testing connections…" : done ? (passed > 0 ? "You're all set!" : "Almost there") : ""}
+      </h3>
+      <p className="text-sm text-neutral-400 mb-6">
+        {done && passed > 0 && `${passed} of ${total} providers connected and working.`}
+        {done && passed === 0 && "No providers configured yet — you can add keys in Settings anytime."}
+      </p>
+
+      {/* Live test results */}
+      <div className="space-y-2 mb-6 text-left">
+        {Object.entries(results).filter(([, r]: [string, any]) => r.configured).map(([pid, r]: [string, any]) => (
+          <div key={pid} className={cx(
+            "flex items-center gap-3 rounded-xl px-4 py-2.5 border text-sm",
+            r.healthy ? "bg-green-500/5 border-green-500/20" : "bg-red-500/5 border-red-500/20"
+          )}>
+            <span className={r.healthy ? "text-green-400" : "text-red-400"}>
+              {r.healthy ? "✓" : "✗"}
+            </span>
+            <span className="text-white capitalize flex-1">{pid}</span>
+            {r.healthy && <span className="text-xs text-neutral-500">{r.latency_ms}ms</span>}
+            {!r.healthy && <span className="text-xs text-red-400/70">{r.error?.slice(0, 40)}</span>}
+          </div>
+        ))}
+        {testing && (
+          <div className="flex items-center gap-3 rounded-xl px-4 py-2.5 border border-white/10 text-sm">
+            <div className="w-4 h-4 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin" />
+            <span className="text-white/50">Testing connections…</span>
+          </div>
+        )}
+        {done && total === 0 && (
+          <div className="text-center py-4 text-neutral-500 text-sm">
+            No API keys added yet — that's fine! Add them in Settings when ready.
+          </div>
+        )}
+      </div>
+
+      <div className="flex gap-3">
+        <button onClick={onBack} className="px-4 py-2.5 bg-white/5 text-white/50 rounded-xl text-sm hover:text-white transition-colors">← Back</button>
+        <button onClick={onDone}
+          className="flex-1 py-2.5 bg-gradient-to-r from-cyan-500 to-violet-500 text-white font-semibold rounded-xl hover:opacity-90 transition-opacity">
+          Open AgentFlow →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Provider connection card component ────────────────────────────────────────
+function ProviderConnectionCard({
+  info, pid, editVal, isTesting, testResult,
+  onEdit, onSave, onTest, onRemove, saving,
+  googleStatus, googleSetupStep, setGoogleSetupStep,
+  googleClientId, setGoogleClientId,
+  googleClientSecret, setGoogleClientSecret,
+  saveGoogleCreds, startGoogleOAuth, revokeGoogle, testGoogle,
+  openAIStatus, openAIGuide, openAIKey, setOpenAIKey, connectOpenAI,
+}: any) {
+
+  if (pid === "gemini") {
+    const isOAuth = info.auth_method === "oauth";
+    return (
+      <div className={cx("group rounded-2xl border p-5 transition-all duration-300",
+        info.configured
+          ? "bg-gradient-to-br from-blue-950/30 to-cyan-950/20 border-blue-500/20"
+          : "bg-white/[0.02] border-white/8 hover:border-white/15")}>
+
+        {/* Header */}
+        <div className="flex items-start gap-3 mb-4">
+          <div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-xl flex-shrink-0">
+            🔵
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-semibold text-white">Google Gemini</span>
+              <span className="text-[10px] bg-green-500/15 text-green-400 border border-green-500/25 px-2 py-0.5 rounded-full">FREE</span>
+              {info.configured && (
+                <span className="text-[10px] bg-blue-500/15 text-blue-400 border border-blue-500/25 px-2 py-0.5 rounded-full">
+                  {isOAuth ? "✓ OAuth" : "✓ API key"}
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-neutral-500 mt-0.5">Gemini 2.0 Flash, 1.5 Pro — sign in with Google or use an API key</p>
+          </div>
+          <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer"
+            className="text-[10px] text-neutral-600 hover:text-cyan-500 transition-colors whitespace-nowrap opacity-0 group-hover:opacity-100">
+            AI Studio →
+          </a>
+        </div>
+
+        {/* Connected via OAuth */}
+        {isOAuth && googleStatus?.connected && (
+          <div className="mb-4 flex items-center justify-between bg-green-500/8 border border-green-500/20 rounded-xl px-4 py-3">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-green-400 to-emerald-500 flex items-center justify-center text-sm font-bold text-black">
+                {(googleStatus.user_name || "G")[0].toUpperCase()}
+              </div>
+              <div>
+                <div className="text-sm font-medium text-white">{googleStatus.user_name}</div>
+                <div className="text-xs text-neutral-500">{googleStatus.user_email}</div>
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={testGoogle}
+                className="text-xs px-3 py-1.5 bg-white/8 hover:bg-white/12 text-neutral-300 rounded-lg transition-colors">
+                Test ⚡
+              </button>
+              <button onClick={revokeGoogle}
+                className="text-xs px-3 py-1.5 text-red-500/70 hover:text-red-400 transition-colors">
+                Sign out
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Setup options */}
+        {!info.configured && (
+          <div className="space-y-3">
+            {/* OAuth option */}
+            <div className="bg-white/4 rounded-xl border border-white/8 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <div className="text-sm font-medium text-white">Sign in with Google</div>
+                  <div className="text-xs text-neutral-500">OAuth2 — no API key, uses your Google account</div>
+                </div>
+                <span className="text-[10px] text-blue-400 border border-blue-500/30 px-2 py-0.5 rounded-full">Recommended</span>
+              </div>
+
+              {googleSetupStep === "idle" && (
+                <button onClick={() => setGoogleSetupStep("creds")}
+                  className="w-full flex items-center justify-center gap-3 py-2.5 bg-white text-neutral-900 text-sm font-semibold rounded-xl hover:bg-neutral-100 transition-colors">
+                  <svg className="w-5 h-5" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                  </svg>
+                  Set up Google Sign-in
+                </button>
+              )}
+
+              {googleSetupStep === "creds" && (
+                <div className="space-y-2">
+                  <div className="bg-blue-500/8 border border-blue-500/15 rounded-lg p-3 text-xs text-blue-300">
+                    <span className="font-medium">One-time setup:</span> Go to{" "}
+                    <a href="https://console.cloud.google.com/apis/credentials" target="_blank" className="underline hover:text-blue-200">
+                      Google Cloud Console
+                    </a>{" "}
+                    → Create OAuth 2.0 Client → Web application. Set redirect URI to{" "}
+                    <code className="bg-blue-900/40 px-1 rounded text-blue-200">{window.location.origin}/auth/google/callback</code>
+                  </div>
+                  <input value={googleClientId} onChange={e => setGoogleClientId(e.target.value)}
+                    placeholder="Client ID  (…googleusercontent.com)"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder-white/25 focus:outline-none focus:border-blue-500/50 font-mono" />
+                  <input type="password" value={googleClientSecret} onChange={e => setGoogleClientSecret(e.target.value)}
+                    placeholder="Client Secret"
+                    className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder-white/25 focus:outline-none focus:border-blue-500/50 font-mono" />
+                  <div className="flex gap-2">
+                    <button onClick={saveGoogleCreds} disabled={!googleClientId || !googleClientSecret}
+                      className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 text-white text-xs font-semibold rounded-lg transition-colors">
+                      Save & Continue
+                    </button>
+                    <button onClick={() => setGoogleSetupStep("idle")}
+                      className="px-3 py-2 text-white/40 hover:text-white text-xs transition-colors">Cancel</button>
+                  </div>
+                </div>
+              )}
+
+              {googleSetupStep === "auth" && (
+                <button onClick={startGoogleOAuth}
+                  className="w-full flex items-center justify-center gap-3 py-2.5 bg-white text-neutral-900 text-sm font-semibold rounded-xl hover:bg-neutral-100 transition-colors">
+                  <svg className="w-5 h-5" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                  </svg>
+                  Sign in with Google
+                </button>
+              )}
+            </div>
+
+            {/* API key option */}
+            <div className="bg-white/[0.02] rounded-xl border border-white/8 p-4">
+              <div className="text-sm font-medium text-white mb-1">Or use an API key</div>
+              <div className="text-xs text-neutral-500 mb-3">
+                Get a free key from <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-cyan-600 hover:text-cyan-400">AI Studio</a>
+              </div>
+              <div className="flex gap-2">
+                <input type="password" value={editVal}
+                  onChange={e => onEdit(e.target.value)}
+                  onKeyDown={(e: any) => e.key === "Enter" && onSave()}
+                  placeholder="AIzaSy..."
+                  className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder-white/25 focus:outline-none focus:border-cyan-500/50 font-mono" />
+                <button onClick={onSave} disabled={!editVal}
+                  className="px-3 py-2 bg-white/10 hover:bg-white/15 disabled:opacity-30 text-white text-xs rounded-lg transition-colors">
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Configured via API key */}
+        {info.configured && !isOAuth && (
+          <div className="flex items-center gap-3">
+            <code className="text-xs text-neutral-400 bg-white/5 px-3 py-1.5 rounded-lg font-mono flex-1">{info.masked}</code>
+            {testResult && (
+              <span className={cx("text-xs px-2 py-1 rounded-lg", testResult.success ? "text-green-400 bg-green-500/10" : "text-red-400 bg-red-500/10")}>
+                {testResult.success ? `✓ ${testResult.latency_ms}ms` : "✗ failed"}
+              </span>
+            )}
+            <button onClick={onTest} disabled={isTesting}
+              className="text-xs px-3 py-1.5 bg-white/8 hover:bg-white/12 text-white rounded-lg transition-colors">
+              {isTesting ? "…" : "Test"}
+            </button>
+            <button onClick={onRemove} className="text-xs text-red-500/60 hover:text-red-400 transition-colors">Remove</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (pid === "openai") {
+    return (
+      <div className={cx("group rounded-2xl border p-5 transition-all duration-300",
+        openAIStatus?.valid
+          ? "bg-gradient-to-br from-green-950/30 to-emerald-950/20 border-green-500/20"
+          : "bg-white/[0.02] border-white/8 hover:border-white/15")}>
+
+        <div className="flex items-start gap-3 mb-4">
+          <div className="w-10 h-10 rounded-xl bg-green-500/10 border border-green-500/20 flex items-center justify-center text-xl flex-shrink-0">🟢</div>
+          <div className="flex-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-semibold text-white">OpenAI</span>
+              {openAIStatus?.valid && <span className="text-[10px] bg-green-500/15 text-green-400 border border-green-500/25 px-2 py-0.5 rounded-full">✓ connected</span>}
+              {openAIStatus?.tier && <span className="text-[10px] text-neutral-500 border border-white/10 px-2 py-0.5 rounded-full">{openAIStatus.tier}</span>}
+            </div>
+            <p className="text-xs text-neutral-500 mt-0.5">GPT-4o, o4-mini — API billing is separate from ChatGPT Plus</p>
+          </div>
+        </div>
+
+        {!openAIStatus?.valid && (
+          <div className="mb-4 flex gap-3 bg-amber-500/8 border border-amber-500/20 rounded-xl px-4 py-3">
+            <span className="text-amber-400 text-lg">⚠</span>
+            <div>
+              <div className="text-sm font-medium text-amber-300">ChatGPT Plus ≠ API Access</div>
+              <div className="text-xs text-neutral-500 mt-0.5 leading-relaxed">
+                Your $20/mo subscription is for chat.openai.com only. The API has separate billing — same account, minimum $5 top-up, pay per use. GPT-4o Mini costs ~$0.15/1M tokens.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {openAIStatus?.valid && (
+          <div className="mb-4 flex items-center gap-3 bg-green-500/8 border border-green-500/20 rounded-xl px-4 py-2.5">
+            <div className="w-2 h-2 rounded-full bg-green-400" />
+            <code className="text-xs text-neutral-400 font-mono flex-1">{openAIStatus.masked_key}</code>
+            <span className="text-xs text-neutral-600">{openAIStatus.model_count} models · {openAIStatus.latency_ms}ms</span>
+            <button onClick={() => onRemove()} className="text-xs text-red-500/60 hover:text-red-400 transition-colors ml-2">Remove</button>
+          </div>
+        )}
+
+        {!openAIStatus?.valid && openAIGuide && (
+          <div className="mb-4 grid grid-cols-2 gap-2">
+            {openAIGuide.steps.map((s: any) => (
+              <div key={s.step} className="flex gap-2.5 text-xs">
+                <span className="w-5 h-5 rounded-full bg-white/8 border border-white/12 flex items-center justify-center text-[10px] text-white/50 flex-shrink-0">{s.step}</span>
+                <div>
+                  <span className="text-white/70 font-medium">{s.title}</span>
+                  {s.url && <a href={s.url} target="_blank" rel="noreferrer" className="ml-1 text-cyan-600 hover:text-cyan-400">↗</a>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <input type="password" value={openAIKey}
+            onChange={e => setOpenAIKey(e.target.value)}
+            onKeyDown={(e: any) => e.key === "Enter" && connectOpenAI()}
+            placeholder="sk-proj-... or sk-..."
+            className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white placeholder-white/25 focus:outline-none focus:border-green-500/50 font-mono" />
+          <button onClick={connectOpenAI} disabled={!openAIKey.trim()}
+            className="px-4 py-2.5 bg-green-700 hover:bg-green-600 disabled:opacity-30 text-white text-sm font-semibold rounded-xl transition-colors whitespace-nowrap">
+            Connect
+          </button>
+        </div>
+
+        {openAIGuide?.cost_estimate && (
+          <div className="mt-3 flex gap-2 flex-wrap">
+            {Object.entries(openAIGuide.cost_estimate).map(([m, cost]: [string, any]) => (
+              <div key={m} className="bg-white/4 rounded-lg px-2 py-1 text-[10px]">
+                <span className="text-white/50">{m.replace(/_/g," ")}</span>
+                <span className="text-white/30 ml-1">{cost}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Generic provider card
+  const COLORS: Record<string, string> = {
+    groq: "yellow", together: "violet", mistral: "red", anthropic: "orange", openrouter: "slate"
+  };
+  const col = COLORS[pid] || "neutral";
+  const borderClass = info.configured ? `border-${col}-500/20` : "border-white/8";
+
+  return (
+    <div className={cx("group rounded-2xl border p-5 transition-all duration-300 bg-white/[0.02] hover:border-white/15", borderClass)}>
+      <div className="flex items-start gap-3">
+        <div className={cx(`w-10 h-10 rounded-xl bg-${col}-500/10 border border-${col}-500/20 flex items-center justify-center text-xl flex-shrink-0`)}>
+          {info.icon}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap mb-0.5">
+            <span className="font-semibold text-white">{info.name}</span>
+            {info.free_tier && <span className="text-[10px] bg-green-500/12 text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full">FREE</span>}
+            {info.configured && <span className="text-[10px] bg-cyan-500/12 text-cyan-400 border border-cyan-500/20 px-2 py-0.5 rounded-full">✓ active</span>}
+          </div>
+          <p className="text-xs text-neutral-500">{info.description}</p>
+        </div>
+        <a href={info.get_key_url} target="_blank" rel="noreferrer"
+          className="text-[10px] text-neutral-600 hover:text-cyan-500 transition-colors whitespace-nowrap opacity-0 group-hover:opacity-100">
+          Get key →
+        </a>
+      </div>
+
+      {info.configured && (
+        <div className="mt-3 flex items-center gap-2">
+          <code className="text-xs text-neutral-500 bg-white/5 px-3 py-1.5 rounded-lg font-mono flex-1">{info.masked}</code>
+          {testResult && (
+            <span className={cx("text-xs px-2 py-1 rounded-lg", testResult.success ? "text-green-400 bg-green-500/10" : "text-red-400 bg-red-500/10")}>
+              {testResult.success ? `✓ ${testResult.latency_ms}ms` : "✗ err"}
+            </span>
+          )}
+          <button onClick={onTest} disabled={isTesting}
+            className="text-xs px-3 py-1.5 bg-white/8 hover:bg-white/12 text-white rounded-lg transition-colors">
+            {isTesting ? "…" : "Test"}
+          </button>
+          <button onClick={onRemove} className="text-xs text-red-500/50 hover:text-red-400 transition-colors">✕</button>
+        </div>
+      )}
+
+      <div className={cx("flex gap-2 transition-all duration-200", info.configured ? "mt-2" : "mt-3")}>
+        <input type="password" value={editVal}
+          onChange={e => onEdit(e.target.value)}
+          onKeyDown={(e: any) => e.key === "Enter" && onSave()}
+          placeholder={info.configured ? "Replace key…" : `Paste your ${info.name} API key…`}
+          className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white placeholder-white/25 focus:outline-none focus:border-cyan-500/50 font-mono" />
+        <button onClick={onSave} disabled={!editVal || saving}
+          className="px-4 py-2.5 bg-white/10 hover:bg-white/15 disabled:opacity-30 text-white text-sm rounded-xl transition-colors">
+          {saving ? "…" : "Save"}
+        </button>
+      </div>
+
+      <div className="mt-2 flex items-center gap-3">
+        <a href={info.get_key_url} target="_blank" rel="noreferrer" className="text-[11px] text-cyan-700 hover:text-cyan-500 transition-colors">Get key →</a>
+        <a href={info.docs} target="_blank" rel="noreferrer" className="text-[11px] text-neutral-700 hover:text-neutral-500 transition-colors">Docs</a>
+        <span className="text-[10px] text-neutral-800 font-mono ml-auto">{info.env_var}</span>
+      </div>
+    </div>
+  );
+}
+
+// ── Main SettingsPage ─────────────────────────────────────────────────────────
 function SettingsPage({ stats }: { stats: any }) {
   const [keys, setKeys] = useState<Record<string, any>>({});
   const [editing, setEditing] = useState<Record<string, string>>({});
@@ -1378,7 +2003,7 @@ function SettingsPage({ stats }: { stats: any }) {
   const [saving, setSaving] = useState(false);
   const [ollamaUrl, setOllamaUrl] = useState("");
   const [ollamaStatus, setOllamaStatus] = useState<any>(null);
-  const [showKey, setShowKey] = useState<Record<string, boolean>>({});
+  const [showWizard, setShowWizard] = useState(false);
   // Auth provider states
   const [googleStatus, setGoogleStatus] = useState<any>(null);
   const [googleClientId, setGoogleClientId] = useState("");
@@ -1418,7 +2043,6 @@ function SettingsPage({ stats }: { stats: any }) {
 
   useEffect(() => { load(); }, []);
 
-  // Listen for OAuth popup completion
   useEffect(() => {
     const handler = (e: MessageEvent) => {
       if (e.data?.type === "google_auth_complete") {
@@ -1434,12 +2058,9 @@ function SettingsPage({ stats }: { stats: any }) {
   const startGoogleOAuth = async () => {
     try {
       const r = await apiFetch("/auth/google/start");
-      const w = window.open(r.url, "google_auth",
-        "width=600,height=700,scrollbars=yes,resizable=yes");
+      const w = window.open(r.url, "google_auth", "width=600,height=700,scrollbars=yes,resizable=yes");
       setOauthWindow(w);
-    } catch (e: any) {
-      toast.error(e.message || "Failed to start Google auth");
-    }
+    } catch (e: any) { toast.error(e.message || "Failed to start Google auth"); }
   };
 
   const revokeGoogle = async () => {
@@ -1450,7 +2071,7 @@ function SettingsPage({ stats }: { stats: any }) {
 
   const testGoogle = async () => {
     const r = await apiFetch("/auth/google/test");
-    if (r.ok) toast.success(`Gemini works! ${r.latency_ms}ms — ${r.response?.slice(0,60)}`);
+    if (r.ok) toast.success(`Gemini works! ${r.latency_ms}ms`);
     else toast.error(`Gemini test failed: ${r.error}`);
   };
 
@@ -1469,531 +2090,198 @@ function SettingsPage({ stats }: { stats: any }) {
     if (!openAIKey.trim()) return;
     try {
       const r = await apiFetch("/auth/openai/setup", {
-        method: "POST",
-        body: JSON.stringify({ api_key: openAIKey.trim() }),
+        method: "POST", body: JSON.stringify({ api_key: openAIKey.trim() }),
       });
-      setOpenAIKey("");
-      await load();
-      toast.success(r.message);
-    } catch (e: any) {
-      toast.error(e.message || "Invalid key");
-    }
+      setOpenAIKey(""); await load(); toast.success(r.message);
+    } catch (e: any) { toast.error(e.message || "Invalid key"); }
   };
 
-  const saveKey = async (providerId: string) => {
-    const val = editing[providerId]?.trim();
+  const saveKey = async (pid: string) => {
+    const val = editing[pid]?.trim();
     if (!val) return;
     setSaving(true);
     try {
-      await apiFetch("/settings/keys", {
-        method: "POST",
-        body: JSON.stringify({ keys: { [providerId]: val } }),
-      });
-      setEditing(prev => ({ ...prev, [providerId]: "" }));
+      await apiFetch("/settings/keys", { method: "POST", body: JSON.stringify({ keys: { [pid]: val } }) });
+      setEditing(prev => ({ ...prev, [pid]: "" }));
       await load();
-      toast.success(`${keys[providerId]?.name || providerId} key saved!`);
-    } catch (e: any) {
-      toast.error(e.message || "Failed to save key");
-    } finally { setSaving(false); }
+      toast.success(`${keys[pid]?.name || pid} key saved!`);
+    } catch (e: any) { toast.error(e.message || "Failed to save"); }
+    finally { setSaving(false); }
   };
 
-  const removeKey = async (providerId: string) => {
+  const removeKey = async (pid: string) => {
     try {
-      await apiFetch(`/settings/keys/${providerId}`, { method: "DELETE" });
-      await load();
-      toast.success("Key removed");
+      await apiFetch(`/settings/keys/${pid}`, { method: "DELETE" });
+      await load(); toast.success("Key removed");
     } catch {}
   };
 
-  const testKey = async (providerId: string) => {
-    setTesting(prev => ({ ...prev, [providerId]: true }));
-    setTestResults(prev => ({ ...prev, [providerId]: null }));
+  const testKey = async (pid: string) => {
+    setTesting(prev => ({ ...prev, [pid]: true }));
+    setTestResults(prev => ({ ...prev, [pid]: null }));
     try {
-      const r = await apiFetch(`/settings/keys/${providerId}/test`, { method: "POST" });
-      setTestResults(prev => ({ ...prev, [providerId]: r }));
+      const r = await apiFetch(`/settings/keys/${pid}/test`, { method: "POST" });
+      setTestResults(prev => ({ ...prev, [pid]: r }));
     } catch (e: any) {
-      setTestResults(prev => ({ ...prev, [providerId]: { success: false, error: e.message } }));
-    } finally { setTesting(prev => ({ ...prev, [providerId]: false })); }
+      setTestResults(prev => ({ ...prev, [pid]: { success: false, error: e.message } }));
+    } finally { setTesting(prev => ({ ...prev, [pid]: false })); }
   };
 
-  const saveOllama = async () => {
-    try {
-      await apiFetch(`/settings/ollama?url=${encodeURIComponent(ollamaUrl)}`, { method: "POST" });
-      const o = await apiFetch("/settings/ollama");
-      setOllamaStatus(o);
-      toast.success("Ollama URL saved");
-    } catch {}
-  };
-
-  const providers = Object.values(keys);
-  const configured = providers.filter((p: any) => p.configured);
+  const providerList = Object.values(keys) as ProviderCard[];
+  const configured = providerList.filter(p => p.configured);
+  const ollamaOk = ollamaStatus?.available;
+  const totalActive = configured.length + (ollamaOk ? 1 : 0);
 
   return (
-    <div className="flex-1 overflow-y-auto bg-neutral-950">
-      <div className="max-w-3xl mx-auto px-6 py-8 space-y-8">
+    <div className="flex-1 overflow-y-auto bg-[#080809]">
+      {showWizard && <SetupWizard onDone={() => { setShowWizard(false); load(); }} />}
+
+      <div className="max-w-2xl mx-auto px-6 py-8 space-y-6">
 
         {/* Header */}
-        <div>
-          <h1 className="text-xl font-bold text-white">Settings</h1>
-          <p className="text-neutral-500 text-sm mt-1">
-            Configure API keys and connections. Keys are saved to <code className="text-neutral-400 bg-neutral-900 px-1 rounded">.env</code> and take effect immediately — no restart needed.
-          </p>
+        <div className="flex items-start justify-between">
+          <div>
+            <h1 className="text-xl font-bold text-white tracking-tight">Connections</h1>
+            <p className="text-neutral-500 text-sm mt-0.5">
+              {totalActive > 0
+                ? `${totalActive} provider${totalActive > 1 ? "s" : ""} active · Changes apply instantly`
+                : "No providers connected yet"}
+            </p>
+          </div>
+          <button onClick={() => setShowWizard(true)}
+            className="flex items-center gap-2 px-4 py-2 bg-white/8 hover:bg-white/12 border border-white/10 rounded-xl text-sm text-white transition-colors">
+            <span>🚀</span> Setup Wizard
+          </button>
         </div>
 
-        {/* Status banner */}
+        {/* System status bar */}
         <div className="grid grid-cols-3 gap-3">
           {[
-            { label: "Local (Ollama)", value: stats?.ollama?.healthy_hosts > 0 ? "Connected" : "Offline", ok: stats?.ollama?.healthy_hosts > 0, icon: "🦙" },
-            { label: "Cloud Providers", value: `${configured.length} / ${providers.length} active`, ok: configured.length > 0, icon: "☁️" },
-            { label: "Mode", value: stats?.mode || "demo", ok: stats?.mode !== "demo", icon: "⚡" },
+            { label: "Ollama", value: ollamaOk ? `${ollamaStatus?.model_count || 0} models` : "Offline",
+              sub: ollamaOk ? `${ollamaStatus?.latency_ms}ms` : "Not connected",
+              ok: ollamaOk, icon: "🦙" },
+            { label: "Cloud", value: `${configured.length} active`,
+              sub: configured.length > 0 ? configured.map((p: any) => p.icon).join(" ") : "No keys set",
+              ok: configured.length > 0, icon: "☁️" },
+            { label: "Mode", value: stats?.mode || "demo",
+              sub: stats?.mode === "hybrid" ? "Local + Cloud" : stats?.mode === "local" ? "Ollama only" : "Add a provider",
+              ok: stats?.mode !== "demo", icon: "⚡" },
           ].map(item => (
-            <div key={item.label} className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
-              <div className="flex items-center gap-2 mb-1">
-                <span>{item.icon}</span>
+            <div key={item.label} className={cx(
+              "rounded-xl p-4 border transition-colors",
+              item.ok ? "bg-white/[0.03] border-white/8" : "bg-white/[0.01] border-white/5"
+            )}>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-base">{item.icon}</span>
                 <span className="text-xs text-neutral-500">{item.label}</span>
+                <div className={cx("w-1.5 h-1.5 rounded-full ml-auto", item.ok ? "bg-green-400" : "bg-neutral-700")} />
               </div>
-              <div className={cx("text-sm font-semibold", item.ok ? "text-green-400" : "text-neutral-500")}>
-                {item.value}
-              </div>
+              <div className={cx("text-sm font-semibold", item.ok ? "text-white" : "text-neutral-600")}>{item.value}</div>
+              <div className="text-[10px] text-neutral-600 mt-0.5">{item.sub}</div>
             </div>
           ))}
         </div>
 
-        {/* Ollama hosts */}
-        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5">
+        {/* Ollama section */}
+        <div className="rounded-2xl border border-white/8 bg-white/[0.02] p-5">
           <div className="flex items-center gap-3 mb-4">
-            <span className="text-2xl">🦙</span>
-            <div>
-              <h2 className="text-sm font-semibold text-white">Ollama</h2>
-              <p className="text-xs text-neutral-500">Local or remote — supports API key authentication</p>
+            <div className="w-10 h-10 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-xl">🦙</div>
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-white">Ollama</span>
+                <span className="text-[10px] text-green-400 border border-green-500/20 px-2 py-0.5 rounded-full bg-green-500/8">FREE</span>
+              </div>
+              <p className="text-xs text-neutral-500 mt-0.5">Local or remote — supports API key for secured endpoints</p>
             </div>
-            <div className={cx("ml-auto flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border",
-              ollamaStatus?.available
-                ? "text-green-400 border-green-500/30 bg-green-500/10"
-                : "text-amber-500 border-amber-500/30 bg-amber-500/10")}>
-              <div className={cx("w-1.5 h-1.5 rounded-full", ollamaStatus?.available ? "bg-green-400" : "bg-amber-500")} />
-              {ollamaStatus?.available ? `${ollamaStatus.model_count || 0} models · ${ollamaStatus.latency_ms}ms` : "Offline"}
+            <div className={cx("flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full border",
+              ollamaOk ? "text-green-400 border-green-500/25 bg-green-500/8" : "text-neutral-600 border-white/8")}>
+              <div className={cx("w-1.5 h-1.5 rounded-full", ollamaOk ? "bg-green-400 animate-pulse" : "bg-neutral-700")} />
+              {ollamaOk ? `${ollamaStatus?.model_count} models · ${ollamaStatus?.latency_ms}ms` : "Offline"}
             </div>
           </div>
 
-          {/* Add / update host form */}
-          <div className="space-y-2 mb-4">
+          <div className="space-y-2">
+            <input value={ollamaUrl} onChange={e => setOllamaUrl(e.target.value)}
+              placeholder="http://localhost:11434"
+              className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white placeholder-white/25 focus:outline-none focus:border-cyan-500/40 font-mono" />
             <div className="flex gap-2">
-              <input value={ollamaUrl} onChange={e => setOllamaUrl(e.target.value)}
-                placeholder="http://localhost:11434  or  https://your-server.com:11434"
-                className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-600 focus:outline-none focus:border-cyan-600 font-mono" />
-            </div>
-            <div className="flex gap-2">
-              <input
-                id="ollama-key-input"
-                type="password"
-                placeholder="API key (optional — only needed for secured/remote Ollama)"
-                className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-600 focus:outline-none focus:border-cyan-600 font-mono"
-              />
+              <input id="ollama-key-input" type="password"
+                placeholder="API key (optional — for secured/remote Ollama)"
+                className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white placeholder-white/25 focus:outline-none focus:border-cyan-500/40 font-mono" />
               <button onClick={async () => {
-                  const keyInput = document.getElementById("ollama-key-input") as HTMLInputElement;
-                  const apiKey = keyInput?.value || "";
-                  try {
-                    const r = await apiFetch(`/settings/ollama?url=${encodeURIComponent(ollamaUrl)}&api_key=${encodeURIComponent(apiKey)}`, { method: "POST" });
-                    await load();
-                    if (r.available) toast.success(`Connected — ${r.model_count} models`);
-                    else toast.error(r.error || "Could not connect");
-                    if (keyInput) keyInput.value = "";
-                  } catch {}
+                  const ki = document.getElementById("ollama-key-input") as HTMLInputElement;
+                  const r = await apiFetch(`/settings/ollama?url=${encodeURIComponent(ollamaUrl)}&api_key=${encodeURIComponent(ki?.value||"")}`, { method: "POST" });
+                  await load(); if (ki) ki.value = "";
+                  if (r.available) toast.success(`Connected — ${r.model_count} models`);
+                  else toast.error(r.error || "Cannot connect");
                 }}
-                className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-sm rounded-lg transition-colors whitespace-nowrap">
-                Add / Update
+                className="px-4 py-2.5 bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold rounded-xl transition-colors whitespace-nowrap">
+                Save
               </button>
             </div>
-            <p className="text-[10px] text-neutral-700">
-              For remote servers, set <code className="text-neutral-600">OLLAMA_HOST=0.0.0.0</code> on the server. Use API key if you secured it with a reverse proxy.
-            </p>
           </div>
 
-          {/* Host list */}
-          {ollamaStatus?.all_hosts && ollamaStatus.all_hosts.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-[10px] text-neutral-600 uppercase tracking-wider">Configured hosts</p>
-              {ollamaStatus.all_hosts.map((h: any, i: number) => (
-                <div key={h.url} className="flex items-center gap-3 bg-neutral-800/60 rounded-lg px-3 py-2">
-                  {i === 0 && <span className="text-[10px] text-cyan-500 border border-cyan-500/30 px-1.5 py-0.5 rounded">primary</span>}
-                  <span className="font-mono text-xs text-neutral-400 flex-1 truncate">{h.url}</span>
-                  {h.api_key && <span className="text-[10px] text-neutral-600">🔑 key set</span>}
-                  <button onClick={async () => {
-                      await apiFetch(`/ollama/hosts/${encodeURIComponent(h.url)}/set-primary`, { method: "POST" });
-                      await load();
-                    }}
-                    className="text-[10px] text-neutral-600 hover:text-cyan-500 transition-colors">
-                    set primary
-                  </button>
-                  <button onClick={async () => {
-                      await apiFetch(`/ollama/hosts/${encodeURIComponent(h.url)}`, { method: "DELETE" });
-                      await load();
-                    }}
-                    className="text-[10px] text-neutral-600 hover:text-red-400 transition-colors">
-                    remove
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Models on primary */}
           {ollamaStatus?.available && ollamaStatus.models?.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-1.5">
-              {ollamaStatus.models.slice(0, 10).map((m: any) => (
-                <span key={m.name} className="text-[10px] bg-neutral-800 text-neutral-400 px-2 py-0.5 rounded-full border border-neutral-700">
+              {ollamaStatus.models.slice(0, 8).map((m: any) => (
+                <span key={m.name} className="text-[10px] bg-white/5 text-neutral-500 px-2 py-0.5 rounded-full border border-white/8 font-mono">
                   {m.name}
                 </span>
               ))}
+              {ollamaStatus.models.length > 8 && (
+                <span className="text-[10px] text-neutral-600">+{ollamaStatus.models.length - 8} more</span>
+              )}
             </div>
           )}
 
           {ollamaStatus?.error && (
-            <p className="mt-2 text-xs text-amber-600">{ollamaStatus.error}</p>
+            <p className="mt-2 text-xs text-amber-600/70">{ollamaStatus.error}</p>
           )}
         </div>
 
-        {/* Cloud API Keys */}
+        {/* Cloud provider cards */}
         <div>
-          <h2 className="text-sm font-semibold text-white mb-3">Cloud API Keys</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-white">Cloud Providers</h2>
+            <span className="text-xs text-neutral-600">{configured.length} of {providerList.length} configured</span>
+          </div>
           <div className="space-y-3">
-            {Object.entries(keys).map(([pid, info]: [string, any]) => {
-              const testResult = testResults[pid];
-              const isTesting = testing[pid];
-              const editVal = editing[pid] || "";
-
-              // ── Gemini: special OAuth card ──
-              if (pid === "gemini") {
-                const isOAuth = info.auth_method === "oauth";
-                const hasApiKey = info.auth_method === "api_key";
-                return (
-                  <div key={pid} className={cx("bg-neutral-900 border rounded-xl p-5",
-                    info.configured ? "border-cyan-800/40" : "border-neutral-800")}>
-                    <div className="flex items-start gap-3 mb-4">
-                      <span className="text-2xl">🔵</span>
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-white">Google Gemini</span>
-                          <span className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 py-0.5 rounded-full">FREE tier</span>
-                          {info.configured && <span className="text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 px-1.5 py-0.5 rounded-full">✓ active</span>}
-                        </div>
-                        <p className="text-xs text-neutral-500 mt-0.5">Gemini 2.0 Flash, 1.5 Pro — free with your Google account</p>
-                      </div>
-                    </div>
-
-                    {/* OAuth connected state */}
-                    {isOAuth && googleStatus?.connected && (
-                      <div className="mb-4 flex items-center justify-between bg-green-500/5 border border-green-500/20 rounded-lg px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                          <div>
-                            <div className="text-sm text-green-300 font-medium">{googleStatus.user_name || "Connected"}</div>
-                            <div className="text-xs text-neutral-500">{googleStatus.user_email}</div>
-                          </div>
-                        </div>
-                        <div className="flex gap-2">
-                          <button onClick={testGoogle}
-                            className="text-xs px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg transition-colors">
-                            Test
-                          </button>
-                          <button onClick={revokeGoogle}
-                            className="text-xs px-3 py-1.5 bg-red-900/30 hover:bg-red-900/50 border border-red-700/30 text-red-400 rounded-lg transition-colors">
-                            Disconnect
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Auth method chooser */}
-                    {!info.configured && (
-                      <div className="space-y-3">
-                        {/* Option 1: Sign in with Google */}
-                        <div className="bg-neutral-800/60 rounded-xl p-4">
-                          <div className="flex items-center justify-between mb-2">
-                            <div>
-                              <div className="text-sm font-medium text-white">Option 1 — Sign in with Google</div>
-                              <div className="text-xs text-neutral-500">Uses OAuth2 — no API key needed, works with your Google account</div>
-                            </div>
-                            <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full">Recommended</span>
-                          </div>
-
-                          {googleSetupStep === "idle" && (
-                            <button onClick={() => setGoogleSetupStep("creds")}
-                              className="w-full mt-2 flex items-center justify-center gap-2 px-4 py-2.5 bg-white text-neutral-900 text-sm font-medium rounded-lg hover:bg-neutral-100 transition-colors">
-                              <svg className="w-4 h-4" viewBox="0 0 24 24">
-                                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-                                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-                              </svg>
-                              Set up Google OAuth
-                            </button>
-                          )}
-
-                          {googleSetupStep === "creds" && (
-                            <div className="space-y-2 mt-2">
-                              <p className="text-[11px] text-neutral-400">
-                                Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" className="text-cyan-500 hover:underline">Google Cloud Console</a> → Create credentials → OAuth 2.0 Client ID → Web application. Set redirect URI to <code className="text-xs bg-neutral-700 px-1 rounded">http://your-server:8000/auth/google/callback</code>
-                              </p>
-                              <input value={googleClientId} onChange={e => setGoogleClientId(e.target.value)}
-                                placeholder="Client ID (ends with .apps.googleusercontent.com)"
-                                className="w-full bg-neutral-700 border border-neutral-600 rounded-lg px-3 py-2 text-xs text-neutral-300 placeholder-neutral-600 focus:outline-none focus:border-cyan-600 font-mono" />
-                              <input type="password" value={googleClientSecret} onChange={e => setGoogleClientSecret(e.target.value)}
-                                placeholder="Client Secret"
-                                className="w-full bg-neutral-700 border border-neutral-600 rounded-lg px-3 py-2 text-xs text-neutral-300 placeholder-neutral-600 focus:outline-none focus:border-cyan-600 font-mono" />
-                              <div className="flex gap-2">
-                                <button onClick={saveGoogleCreds} disabled={!googleClientId || !googleClientSecret}
-                                  className="flex-1 px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-30 text-white text-xs rounded-lg transition-colors">
-                                  Save & Continue
-                                </button>
-                                <button onClick={() => setGoogleSetupStep("idle")}
-                                  className="px-3 py-2 bg-neutral-700 text-neutral-400 text-xs rounded-lg">Cancel</button>
-                              </div>
-                            </div>
-                          )}
-
-                          {googleSetupStep === "auth" && (
-                            <button onClick={startGoogleOAuth}
-                              className="w-full mt-2 flex items-center justify-center gap-2 px-4 py-2.5 bg-white text-neutral-900 text-sm font-medium rounded-lg hover:bg-neutral-100 transition-colors">
-                              <svg className="w-4 h-4" viewBox="0 0 24 24">
-                                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-                                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-                              </svg>
-                              Sign in with Google
-                            </button>
-                          )}
-                        </div>
-
-                        {/* Option 2: API Key */}
-                        <div className="bg-neutral-800/40 rounded-xl p-4">
-                          <div className="text-sm font-medium text-white mb-1">Option 2 — API Key</div>
-                          <div className="text-xs text-neutral-500 mb-2">Get a free key from <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-cyan-600 hover:underline">AI Studio</a> (sign in with Google there)</div>
-                          <div className="flex gap-2">
-                            <input type="password" value={editVal}
-                              onChange={e => setEditing(prev => ({...prev, [pid]: e.target.value}))}
-                              onKeyDown={e => e.key === "Enter" && saveKey(pid)}
-                              placeholder="AIza..."
-                              className="flex-1 bg-neutral-700 border border-neutral-600 rounded-lg px-3 py-2 text-xs text-neutral-300 placeholder-neutral-600 focus:outline-none focus:border-cyan-600 font-mono" />
-                            <button onClick={() => saveKey(pid)} disabled={!editVal.trim()}
-                              className="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-30 text-white text-xs rounded-lg">Save</button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Already configured — show both management options */}
-                    {info.configured && !isOAuth && (
-                      <div className="flex gap-2">
-                        <input type="password" value={editVal}
-                          onChange={e => setEditing(prev => ({...prev, [pid]: e.target.value}))}
-                          placeholder="Replace API key…"
-                          className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-xs text-neutral-300 placeholder-neutral-700 focus:outline-none focus:border-cyan-600 font-mono" />
-                        <button onClick={() => saveKey(pid)} disabled={!editVal.trim()}
-                          className="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-30 text-white text-xs rounded-lg">Update</button>
-                        <button onClick={() => {
-                            setGoogleSetupStep(googleStatus?.has_client_id ? "auth" : "creds");
-                          }}
-                          className="px-3 py-2 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 text-xs rounded-lg whitespace-nowrap">
-                          Switch to OAuth
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                );
-              }
-
-              // ── OpenAI: guided setup card ──
-              if (pid === "openai") {
-                return (
-                  <div key={pid} className={cx("bg-neutral-900 border rounded-xl p-5",
-                    openAIStatus?.valid ? "border-green-800/40" : "border-neutral-800")}>
-                    <div className="flex items-start gap-3 mb-4">
-                      <span className="text-2xl">🟢</span>
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-white">OpenAI</span>
-                          {openAIStatus?.valid && <span className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 py-0.5 rounded-full">✓ connected</span>}
-                          {openAIStatus?.tier && <span className="text-[10px] text-neutral-600 border border-neutral-700 px-1.5 py-0.5 rounded-full">{openAIStatus.tier}</span>}
-                        </div>
-                        <p className="text-xs text-neutral-500 mt-0.5">GPT-4o, o4-mini — API is separate from your ChatGPT Plus subscription</p>
-                      </div>
-                    </div>
-
-                    {/* Plus note */}
-                    {!openAIStatus?.valid && (
-                      <div className="mb-4 bg-amber-500/5 border border-amber-500/20 rounded-lg px-4 py-3">
-                        <div className="flex gap-2">
-                          <span className="text-amber-500 text-sm">ℹ️</span>
-                          <div>
-                            <div className="text-xs font-medium text-amber-300">ChatGPT Plus ≠ API Access</div>
-                            <div className="text-xs text-neutral-500 mt-0.5">Your Plus subscription is for chat.openai.com. The API uses the same account but has its own billing — minimum $5 top-up, pay per use.</div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Connected state */}
-                    {openAIStatus?.valid && (
-                      <div className="mb-4 flex items-center gap-3 bg-green-500/5 border border-green-500/20 rounded-lg px-4 py-2">
-                        <div className="w-2 h-2 rounded-full bg-green-400" />
-                        <div className="flex-1">
-                          <span className="text-xs text-neutral-400 font-mono">{openAIStatus.masked_key}</span>
-                          <span className="ml-3 text-xs text-neutral-600">{openAIStatus.model_count} models · {openAIStatus.latency_ms}ms</span>
-                        </div>
-                        <button onClick={() => removeKey("openai")}
-                          className="text-xs text-red-500 hover:text-red-400">Remove</button>
-                      </div>
-                    )}
-
-                    {/* Steps guide */}
-                    {openAIGuide && !openAIStatus?.valid && (
-                      <div className="mb-4 space-y-2">
-                        {openAIGuide.steps.map((s: any) => (
-                          <div key={s.step} className="flex gap-3 text-xs">
-                            <span className="w-5 h-5 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center text-[10px] text-neutral-500 flex-shrink-0 mt-0.5">{s.step}</span>
-                            <div className="flex-1">
-                              <span className="text-neutral-300 font-medium">{s.title}</span>
-                              {s.url && (
-                                <a href={s.url} target="_blank" rel="noreferrer"
-                                  className="ml-2 text-cyan-600 hover:text-cyan-400">open →</a>
-                              )}
-                              <div className="text-neutral-600 mt-0.5">{s.description}</div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Key input */}
-                    <div className="flex gap-2">
-                      <input type="password" value={openAIKey}
-                        onChange={e => setOpenAIKey(e.target.value)}
-                        onKeyDown={e => e.key === "Enter" && connectOpenAI()}
-                        placeholder="sk-proj-... or sk-..."
-                        className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-700 focus:outline-none focus:border-green-600 font-mono" />
-                      <button onClick={connectOpenAI} disabled={!openAIKey.trim()}
-                        className="px-4 py-2 bg-green-700 hover:bg-green-600 disabled:opacity-30 text-white text-sm rounded-lg transition-colors whitespace-nowrap">
-                        Connect
-                      </button>
-                    </div>
-
-                    {/* Cost table */}
-                    {openAIGuide?.cost_estimate && (
-                      <div className="mt-3 flex gap-3 text-[10px]">
-                        {Object.entries(openAIGuide.cost_estimate).map(([model, cost]: [string, any]) => (
-                          <div key={model} className="bg-neutral-800/60 rounded px-2 py-1">
-                            <div className="text-neutral-500">{model.replace(/_/g," ")}</div>
-                            <div className="text-neutral-400">{cost}</div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              }
-
-              return (
-                <div key={pid} className={cx(
-                  "bg-neutral-900 border rounded-xl p-5 transition-colors",
-                  info.configured ? "border-neutral-700" : "border-neutral-800"
-                )}>
-                  <div className="flex items-start gap-3">
-                    {/* Icon + name */}
-                    <div className="flex-shrink-0 mt-0.5">
-                      <span className="text-2xl">{info.icon}</span>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-0.5">
-                        <span className="text-sm font-semibold text-white">{info.name}</span>
-                        {info.free_tier && (
-                          <span className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 py-0.5 rounded-full">
-                            FREE tier
-                          </span>
-                        )}
-                        {info.configured && (
-                          <span className="text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 px-1.5 py-0.5 rounded-full">
-                            ✓ configured
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-neutral-500 mb-3">{info.description}</p>
-
-                      {/* Current key display */}
-                      {info.configured && (
-                        <div className="flex items-center gap-2 mb-3">
-                          <code className="text-xs text-neutral-400 bg-neutral-800 px-2 py-1 rounded font-mono">
-                            {showKey[pid] ? "••••••••••••" : info.masked}
-                          </code>
-                          <span className="text-[10px] text-neutral-600">{info.key_length} chars</span>
-
-                          {/* Test result */}
-                          {testResult && (
-                            <span className={cx("text-[10px] px-2 py-0.5 rounded-full",
-                              testResult.success
-                                ? "bg-green-500/10 text-green-400"
-                                : "bg-red-500/10 text-red-400")}>
-                              {testResult.success ? `✓ ${testResult.latency_ms}ms` : `✗ ${testResult.error?.slice(0,40)}`}
-                            </span>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Input + actions */}
-                      <div className="flex gap-2">
-                        <input
-                          type="password"
-                          value={editVal}
-                          onChange={e => setEditing(prev => ({ ...prev, [pid]: e.target.value }))}
-                          onKeyDown={e => e.key === "Enter" && saveKey(pid)}
-                          placeholder={info.configured ? "Enter new key to replace…" : `Paste your ${info.name} API key…`}
-                          className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-700 focus:outline-none focus:border-cyan-600 font-mono"
-                        />
-                        <button onClick={() => saveKey(pid)}
-                          disabled={!editVal.trim() || saving}
-                          className="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-30 disabled:cursor-not-allowed text-white text-xs rounded-lg transition-colors whitespace-nowrap">
-                          {saving ? "…" : "Save"}
-                        </button>
-                        {info.configured && (
-                          <>
-                            <button onClick={() => testKey(pid)} disabled={isTesting}
-                              className="px-3 py-2 bg-neutral-700 hover:bg-neutral-600 disabled:opacity-30 text-neutral-300 text-xs rounded-lg transition-colors whitespace-nowrap">
-                              {isTesting ? "Testing…" : "Test"}
-                            </button>
-                            <button onClick={() => removeKey(pid)}
-                              className="px-3 py-2 bg-red-900/30 hover:bg-red-900/50 border border-red-700/30 text-red-400 text-xs rounded-lg transition-colors">
-                              Remove
-                            </button>
-                          </>
-                        )}
-                      </div>
-
-                      {/* Get key link */}
-                      <div className="mt-2 flex items-center gap-3">
-                        <a href={info.get_key_url} target="_blank" rel="noreferrer"
-                          className="text-[11px] text-cyan-700 hover:text-cyan-500 transition-colors">
-                          Get API key →
-                        </a>
-                        <a href={info.docs} target="_blank" rel="noreferrer"
-                          className="text-[11px] text-neutral-700 hover:text-neutral-500 transition-colors">
-                          Docs
-                        </a>
-                        <span className="text-[10px] text-neutral-700 font-mono">{info.env_var}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+            {Object.entries(keys).map(([pid, info]: [string, any]) => (
+              <ProviderConnectionCard key={pid}
+                info={info} pid={pid}
+                editVal={editing[pid] || ""}
+                isTesting={testing[pid]}
+                testResult={testResults[pid]}
+                onEdit={(v: string) => setEditing(prev => ({ ...prev, [pid]: v }))}
+                onSave={() => saveKey(pid)}
+                onTest={() => testKey(pid)}
+                onRemove={() => removeKey(pid)}
+                saving={saving}
+                googleStatus={googleStatus}
+                googleSetupStep={googleSetupStep}
+                setGoogleSetupStep={setGoogleSetupStep}
+                googleClientId={googleClientId}
+                setGoogleClientId={setGoogleClientId}
+                googleClientSecret={googleClientSecret}
+                setGoogleClientSecret={setGoogleClientSecret}
+                saveGoogleCreds={saveGoogleCreds}
+                startGoogleOAuth={startGoogleOAuth}
+                revokeGoogle={revokeGoogle}
+                testGoogle={testGoogle}
+                openAIStatus={openAIStatus}
+                openAIGuide={openAIGuide}
+                openAIKey={openAIKey}
+                setOpenAIKey={setOpenAIKey}
+                connectOpenAI={connectOpenAI}
+              />
+            ))}
           </div>
         </div>
 
-        {/* .env location hint */}
-        <div className="bg-neutral-900/50 border border-neutral-800 rounded-xl p-4">
-          <p className="text-xs text-neutral-600">
-            Keys are stored in <code className="text-neutral-500">{`/opt/agentflow/.env`}</code> on your server. You can also edit this file directly and the server will pick up changes on next request.
+        {/* .env hint */}
+        <div className="rounded-xl border border-white/5 px-4 py-3">
+          <p className="text-xs text-neutral-700">
+            Keys stored in <code className="text-neutral-600 font-mono">.env</code> — take effect immediately, no restart needed.
           </p>
         </div>
 
@@ -2001,7 +2289,6 @@ function SettingsPage({ stats }: { stats: any }) {
     </div>
   );
 }
-
 
 
 export default function App() {
