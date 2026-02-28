@@ -394,6 +394,20 @@ except ImportError as _auth_err:
     import logging
     logging.warning(f"auth_providers not loaded: {_auth_err}")
 
+try:
+    from github_integration import router as github_router
+    app.include_router(github_router)
+except ImportError as _gh_err:
+    import logging
+    logging.warning(f"github_integration not loaded: {_gh_err}")
+
+try:
+    from docker_integration import router as docker_router
+    app.include_router(docker_router)
+except ImportError as _dk_err:
+    import logging
+    logging.warning(f"docker_integration not loaded: {_dk_err}")
+
 # ── Request models ─────────────────────────────────────────────────────────────
 class RunAgentReq(BaseModel):
     agent_key: str = "assistant"; task: str

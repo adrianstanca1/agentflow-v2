@@ -15,6 +15,7 @@ import {
   Wifi, WifiOff, SortDesc, Filter, Star, Clock, Hash, Tag, ChevronUp,
   LayoutDashboard,
   Network,
+  ExternalLink, Github,
 } from "lucide-react";
 
 // Config
@@ -33,7 +34,7 @@ async function apiFetch(path: string, opts: RequestInit = {}) {
   return res.json();
 }
 
-type Page = "chat" | "models" | "agents" | "mcp" | "knowledge" | "openclaw" | "settings";
+type Page = "dashboard" | "chat" | "models" | "agents" | "mcp" | "knowledge" | "openclaw" | "github" | "docker" | "settings";
 
 interface AgentInfo {
   id: string; name: string; description: string; type: string;
@@ -200,6 +201,8 @@ function NavSidebar({ page, setPage, stats }: { page: Page; setPage: (p: Page) =
     { id: "agents",    icon: <Bot className="w-5 h-5" />,           label: "Agents" },
     { id: "mcp",       icon: <Plug className="w-5 h-5" />,          label: "MCP" },
     { id: "knowledge", icon: <Database className="w-5 h-5" />,      label: "Knowledge" },
+    { id: "github",    icon: <Github className="w-5 h-5" />,        label: "GitHub" },
+    { id: "docker",    icon: <span className="text-lg leading-none">🐳</span>, label: "Docker" },
     { id: "settings",  icon: <Settings className="w-5 h-5" />,      label: "Settings" },
   ];
   const healthy = stats?.ollama?.healthy_hosts > 0;
@@ -1236,6 +1239,1456 @@ function MCPPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GITHUB PAGE — Full GitHub interface with repos, files, PRs, issues, AI review
+// ══════════════════════════════════════════════════════════════════════════════
+type GHView = "repos" | "files" | "commits" | "pulls" | "issues";
+
+function GitHubPage() {
+  const [ghStatus, setGhStatus] = useState<any>(null);
+  const [token, setToken] = useState("");
+  const [savingToken, setSavingToken] = useState(false);
+  const [repos, setRepos] = useState<any[]>([]);
+  const [selectedRepo, setSelectedRepo] = useState<any>(null);
+  const [view, setView] = useState<GHView>("repos");
+  const [searchQ, setSearchQ] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  // File browser state
+  const [filePath, setFilePath] = useState("");
+  const [fileTree, setFileTree] = useState<any[]>([]);
+  const [openFile, setOpenFile] = useState<any>(null);
+  const [branch, setBranch] = useState("HEAD");
+  const [branches, setBranches] = useState<any[]>([]);
+  const [pathHistory, setPathHistory] = useState<string[]>([""]);
+
+  // PRs / Issues state
+  const [pulls, setPulls] = useState<any[]>([]);
+  const [issues, setIssues] = useState<any[]>([]);
+  const [pullFilter, setPullFilter] = useState<"open" | "closed">("open");
+  const [issueFilter, setIssueFilter] = useState<"open" | "closed">("open");
+  const [selectedPR, setSelectedPR] = useState<any>(null);
+  const [prDetail, setPrDetail] = useState<any>(null);
+  const [commits, setCommits] = useState<any[]>([]);
+
+  // AI state
+  const [aiReview, setAiReview] = useState("");
+  const [aiRunning, setAiRunning] = useState(false);
+  const [aiDraftPR, setAiDraftPR] = useState<any>(null);
+  const [aiDraftingPR, setAiDraftingPR] = useState(false);
+  const [newPRHead, setNewPRHead] = useState("");
+  const [newPRBase, setNewPRBase] = useState("main");
+
+  const loadStatus = async () => {
+    try {
+      const s = await apiFetch("/github/status");
+      setGhStatus(s);
+      if (s.configured) loadRepos();
+    } catch {}
+  };
+
+  const loadRepos = async () => {
+    setLoading(true);
+    try {
+      const r = await apiFetch("/github/repos?per_page=50&sort=updated");
+      setRepos(r);
+    } catch (e: any) { toast.error(e.message); }
+    setLoading(false);
+  };
+
+  useEffect(() => { loadStatus(); }, []);
+
+  const saveToken = async () => {
+    if (!token.trim()) return;
+    setSavingToken(true);
+    try {
+      const r = await apiFetch(`/github/token?token=${encodeURIComponent(token)}`, { method: "POST" });
+      toast.success(`Connected as @${r.login}`);
+      setToken("");
+      await loadStatus();
+    } catch (e: any) { toast.error(e.message); }
+    setSavingToken(false);
+  };
+
+  const selectRepo = async (repo: any) => {
+    setSelectedRepo(repo);
+    setView("files");
+    setFilePath("");
+    setPathHistory([""]);
+    setOpenFile(null);
+    setAiReview("");
+    setBranch(repo.default_branch || "HEAD");
+    setLoading(true);
+    try {
+      const [tree, brs] = await Promise.all([
+        apiFetch(`/github/repos/${repo.full_name}/tree?ref=${repo.default_branch || "HEAD"}`),
+        apiFetch(`/github/repos/${repo.full_name}/branches`),
+      ]);
+      setFileTree(tree);
+      setBranches(brs);
+    } catch {}
+    setLoading(false);
+  };
+
+  const browsePath = async (path: string) => {
+    if (!selectedRepo) return;
+    setLoading(true);
+    setOpenFile(null);
+    try {
+      const tree = await apiFetch(`/github/repos/${selectedRepo.full_name}/tree?path=${encodeURIComponent(path)}&ref=${branch}`);
+      if (Array.isArray(tree)) {
+        setFileTree(tree);
+        setFilePath(path);
+        setPathHistory(p => [...p.filter(x => x !== path), path]);
+      }
+    } catch {}
+    setLoading(false);
+  };
+
+  const openFileContent = async (path: string) => {
+    if (!selectedRepo) return;
+    setLoading(true);
+    try {
+      const f = await apiFetch(`/github/repos/${selectedRepo.full_name}/file?path=${encodeURIComponent(path)}&ref=${branch}`);
+      setOpenFile(f);
+    } catch (e: any) { toast.error(e.message); }
+    setLoading(false);
+  };
+
+  const loadPulls = async () => {
+    if (!selectedRepo) return;
+    setLoading(true);
+    try {
+      const p = await apiFetch(`/github/repos/${selectedRepo.full_name}/pulls?state=${pullFilter}`);
+      setPulls(p);
+    } catch {}
+    setLoading(false);
+  };
+
+  const loadIssues = async () => {
+    if (!selectedRepo) return;
+    setLoading(true);
+    try {
+      const i = await apiFetch(`/github/repos/${selectedRepo.full_name}/issues?state=${issueFilter}`);
+      setIssues(i);
+    } catch {}
+    setLoading(false);
+  };
+
+  const loadCommits = async () => {
+    if (!selectedRepo) return;
+    setLoading(true);
+    try {
+      const c = await apiFetch(`/github/repos/${selectedRepo.full_name}/commits?per_page=30`);
+      setCommits(c);
+    } catch {}
+    setLoading(false);
+  };
+
+  const loadPRDetail = async (pr: any) => {
+    setSelectedPR(pr);
+    setPrDetail(null);
+    setAiReview("");
+    try {
+      const d = await apiFetch(`/github/repos/${selectedRepo.full_name}/pulls/${pr.number}`);
+      setPrDetail(d);
+    } catch {}
+  };
+
+  const runAiReview = async () => {
+    if (!selectedPR || !selectedRepo) return;
+    setAiRunning(true);
+    setAiReview("");
+    try {
+      const r = await apiFetch("/github/ai/review-pr", {
+        method: "POST",
+        body: JSON.stringify({ owner: selectedRepo.full_name.split("/")[0], repo: selectedRepo.full_name.split("/")[1], pr_number: selectedPR.number }),
+      });
+      setAiReview(r.review);
+    } catch (e: any) { toast.error(e.message); }
+    setAiRunning(false);
+  };
+
+  const draftPR = async () => {
+    if (!selectedRepo || !newPRHead) return;
+    setAiDraftingPR(true);
+    try {
+      const [owner, repo] = selectedRepo.full_name.split("/");
+      const r = await apiFetch(`/github/ai/draft-pr?owner=${owner}&repo=${repo}&head=${encodeURIComponent(newPRHead)}&base=${newPRBase}`, { method: "POST" });
+      setAiDraftPR(r);
+    } catch (e: any) { toast.error(e.message); }
+    setAiDraftingPR(false);
+  };
+
+  useEffect(() => { if (view === "pulls" && selectedRepo) loadPulls(); }, [view, selectedRepo, pullFilter]);
+  useEffect(() => { if (view === "issues" && selectedRepo) loadIssues(); }, [view, selectedRepo, issueFilter]);
+  useEffect(() => { if (view === "commits" && selectedRepo) loadCommits(); }, [view, selectedRepo]);
+
+  // Language colors
+  const LANG_COLORS: Record<string, string> = {
+    TypeScript: "text-blue-400", JavaScript: "text-yellow-400", Python: "text-green-400",
+    Go: "text-cyan-400", Rust: "text-orange-400", Java: "text-red-400",
+    "C++": "text-purple-400", C: "text-gray-400", Ruby: "text-red-300",
+    Swift: "text-orange-300", Kotlin: "text-violet-400", "C#": "text-green-300",
+  };
+
+  const filteredRepos = searchQ
+    ? repos.filter(r => r.name.toLowerCase().includes(searchQ.toLowerCase()) || (r.description || "").toLowerCase().includes(searchQ.toLowerCase()))
+    : repos;
+
+  const repoNavTabs: Array<{ id: GHView; label: string; count?: number }> = selectedRepo ? [
+    { id: "files", label: "Files" },
+    { id: "commits", label: "Commits" },
+    { id: "pulls", label: "PRs", count: selectedRepo.open_issues },
+    { id: "issues", label: "Issues" },
+  ] : [];
+
+  const fileExt = (name: string) => name.split(".").pop() || "";
+  const FILE_ICONS: Record<string, string> = {
+    ts: "🔷", tsx: "⚛️", js: "🟨", jsx: "⚛️", py: "🐍", go: "🐹",
+    rs: "🦀", md: "📝", json: "📋", yaml: "⚙️", yml: "⚙️",
+    sh: "💻", dockerfile: "🐳", css: "🎨", html: "🌐", sql: "🗄️",
+    txt: "📄", png: "🖼️", jpg: "🖼️", svg: "🎨",
+  };
+  const fileIcon = (name: string) => FILE_ICONS[name.toLowerCase().split(".").pop() || ""] || "📄";
+  const langForFile = (name: string): string => {
+    const ext: Record<string, string> = {
+      ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx",
+      py: "python", go: "go", rs: "rust", sh: "bash", md: "markdown",
+      json: "json", yaml: "yaml", yml: "yaml", css: "css", html: "html",
+      sql: "sql", toml: "toml", dockerfile: "dockerfile",
+    };
+    return ext[name.split(".").pop() || ""] || "text";
+  };
+
+  if (!ghStatus?.configured) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-[#080809]">
+        <div className="max-w-md w-full mx-4">
+          <div className="text-center mb-8">
+            <div className="w-20 h-20 bg-white/[0.03] border border-white/10 rounded-3xl flex items-center justify-center mx-auto mb-5">
+              <Github className="w-10 h-10 text-white" />
+            </div>
+            <h1 className="text-2xl font-bold text-white mb-2">Connect GitHub</h1>
+            <p className="text-neutral-500 text-sm">Browse repos, review PRs, manage issues — all with AI assistance</p>
+          </div>
+          <div className="bg-white/[0.02] border border-white/8 rounded-2xl p-6 space-y-4">
+            <div>
+              <div className="text-xs font-medium text-neutral-500 mb-2">Personal Access Token</div>
+              <input
+                type="password"
+                value={token}
+                onChange={e => setToken(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && saveToken()}
+                placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                className="w-full bg-neutral-950 border border-white/8 rounded-xl px-4 py-3 text-sm text-white placeholder-neutral-700 focus:outline-none focus:border-cyan-600/50 font-mono"
+              />
+            </div>
+            <a href="https://github.com/settings/tokens/new?scopes=repo,read:user" target="_blank" rel="noopener noreferrer"
+              className="block text-center text-xs text-cyan-700 hover:text-cyan-500 transition-colors">
+              Create token at github.com/settings/tokens/new →
+            </a>
+            <div className="text-xs text-neutral-700 bg-white/[0.02] rounded-xl p-3 space-y-1">
+              <div>Required scopes: <span className="font-mono text-neutral-500">repo</span>, <span className="font-mono text-neutral-500">read:user</span></div>
+              <div>Token is stored locally in your <span className="font-mono text-neutral-500">.env</span> file</div>
+            </div>
+            <button onClick={saveToken} disabled={!token.trim() || savingToken}
+              className="w-full py-3 bg-white hover:bg-neutral-100 disabled:opacity-40 text-black text-sm font-bold rounded-xl transition-colors flex items-center justify-center gap-2">
+              {savingToken ? <Loader2 className="w-4 h-4 animate-spin" /> : <Github className="w-4 h-4" />}
+              Connect GitHub
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full bg-[#080809]">
+      {/* Left sidebar — Repos or back */}
+      <div className="w-64 flex-shrink-0 border-r border-white/8 flex flex-col">
+        {/* User header */}
+        <div className="p-3 border-b border-white/8">
+          <div className="flex items-center gap-2.5">
+            {ghStatus.avatar_url ? (
+              <img src={ghStatus.avatar_url} alt="" className="w-8 h-8 rounded-full" />
+            ) : (
+              <div className="w-8 h-8 bg-white/10 rounded-full flex items-center justify-center">
+                <Github className="w-4 h-4 text-white" />
+              </div>
+            )}
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold text-white truncate">{ghStatus.name || ghStatus.login}</div>
+              <div className="text-[10px] text-neutral-600">@{ghStatus.login}</div>
+            </div>
+            <div className="text-[10px] text-neutral-700">{ghStatus.public_repos}p</div>
+          </div>
+        </div>
+
+        {/* Repo search */}
+        <div className="p-2 border-b border-white/8">
+          <div className="flex items-center gap-2 bg-white/[0.03] border border-white/8 rounded-lg px-2 py-1.5">
+            <Search className="w-3.5 h-3.5 text-neutral-600 flex-shrink-0" />
+            <input
+              value={searchQ} onChange={e => setSearchQ(e.target.value)}
+              placeholder="Filter repos…"
+              className="flex-1 bg-transparent text-xs text-neutral-300 placeholder-neutral-700 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        {/* Repo list */}
+        <div className="flex-1 overflow-y-auto py-1">
+          {loading && !selectedRepo && (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="w-5 h-5 text-neutral-600 animate-spin" />
+            </div>
+          )}
+          {filteredRepos.map(r => (
+            <button key={r.id} onClick={() => selectRepo(r)}
+              className={cx("w-full text-left px-3 py-2 hover:bg-white/5 transition-colors group",
+                selectedRepo?.full_name === r.full_name ? "bg-white/[0.06]" : "")}>
+              <div className="flex items-center gap-1.5 mb-0.5">
+                {r.fork && <span className="text-[9px] text-neutral-700">⑂</span>}
+                {r.private && <span className="text-[9px] text-amber-800">🔒</span>}
+                <span className="text-xs font-medium text-neutral-200 truncate">{r.name}</span>
+                {r.archived && <span className="text-[9px] text-neutral-700 ml-auto">archived</span>}
+              </div>
+              <div className="flex items-center gap-2 text-[10px] text-neutral-700">
+                {r.language && (
+                  <span className={cx(LANG_COLORS[r.language] || "text-neutral-600")}>
+                    {r.language}
+                  </span>
+                )}
+                {r.stars > 0 && <span>⭐ {r.stars}</span>}
+                {r.open_issues > 0 && <span className="text-amber-800">● {r.open_issues}</span>}
+              </div>
+            </button>
+          ))}
+        </div>
+
+        {/* Disconnect */}
+        <div className="p-2 border-t border-white/8">
+          <button onClick={async () => { await apiFetch("/github/token", { method: "DELETE" }); setGhStatus(null); setRepos([]); setSelectedRepo(null); }}
+            className="w-full text-[10px] text-neutral-700 hover:text-neutral-500 transition-colors py-1">
+            Disconnect GitHub
+          </button>
+        </div>
+      </div>
+
+      {/* Main content */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {!selectedRepo ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center text-neutral-700">
+              <Github className="w-12 h-12 mx-auto mb-3 opacity-30" />
+              <p className="text-sm">Select a repository</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Repo header */}
+            <div className="border-b border-white/8 px-5 py-3">
+              <div className="flex items-center gap-3 mb-2">
+                <button onClick={() => setSelectedRepo(null)} className="text-neutral-600 hover:text-white transition-colors">
+                  <ChevronRight className="w-4 h-4 rotate-180" />
+                </button>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-white">{selectedRepo.full_name}</span>
+                  {selectedRepo.private && <span className="text-[10px] text-amber-600 border border-amber-800/40 rounded px-1 py-0.5">private</span>}
+                  <a href={selectedRepo.html_url} target="_blank" rel="noopener noreferrer"
+                    className="text-neutral-700 hover:text-neutral-400 transition-colors">
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+                <div className="flex items-center gap-3 ml-auto text-[11px] text-neutral-600">
+                  <span>⭐ {selectedRepo.stars}</span>
+                  <span>🔀 {selectedRepo.forks}</span>
+                  {selectedRepo.language && <span className={LANG_COLORS[selectedRepo.language] || "text-neutral-500"}>{selectedRepo.language}</span>}
+                </div>
+              </div>
+              {/* Nav tabs */}
+              <div className="flex gap-1">
+                {repoNavTabs.map(tab => (
+                  <button key={tab.id} onClick={() => setView(tab.id)}
+                    className={cx("px-3 py-1 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5",
+                      view === tab.id ? "bg-white/10 text-white" : "text-neutral-600 hover:text-neutral-400")}>
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* FILE BROWSER */}
+            {view === "files" && (
+              <div className="flex flex-1 min-h-0">
+                {/* File tree */}
+                <div className="w-64 border-r border-white/8 flex flex-col flex-shrink-0">
+                  {/* Breadcrumb + branch */}
+                  <div className="px-3 py-2 border-b border-white/8 flex items-center gap-2">
+                    <button onClick={() => browsePath("")} className="text-[10px] text-neutral-600 hover:text-white transition-colors font-mono">
+                      {selectedRepo.name}
+                    </button>
+                    {filePath && filePath.split("/").map((seg, i, arr) => (
+                      <span key={i} className="flex items-center gap-1">
+                        <ChevronRight className="w-3 h-3 text-neutral-800" />
+                        <button onClick={() => browsePath(arr.slice(0, i+1).join("/"))}
+                          className="text-[10px] text-neutral-600 hover:text-white transition-colors font-mono">
+                          {seg}
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="px-2 py-1 border-b border-white/8">
+                    <select value={branch} onChange={e => { setBranch(e.target.value); browsePath(filePath); }}
+                      className="w-full bg-transparent text-[10px] text-neutral-600 focus:outline-none font-mono">
+                      {branches.map(b => <option key={b.name} value={b.name}>{b.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="flex-1 overflow-y-auto py-1">
+                    {loading && <div className="flex justify-center py-4"><Loader2 className="w-4 h-4 text-neutral-700 animate-spin" /></div>}
+                    {fileTree.map(f => (
+                      <button key={f.path} onClick={() => f.type === "dir" ? browsePath(f.path) : openFileContent(f.path)}
+                        className={cx("w-full text-left px-3 py-1 hover:bg-white/5 transition-colors flex items-center gap-2 group",
+                          openFile?.path === f.path ? "bg-white/[0.06]" : "")}>
+                        <span className="text-xs flex-shrink-0">
+                          {f.type === "dir" ? "📁" : fileIcon(f.name)}
+                        </span>
+                        <span className={cx("text-xs truncate", f.type === "dir" ? "text-neutral-300 font-medium" : "text-neutral-500")}>
+                          {f.name}
+                        </span>
+                        {f.size > 0 && f.type === "file" && (
+                          <span className="text-[9px] text-neutral-800 ml-auto flex-shrink-0">
+                            {f.size > 1024 ? `${(f.size/1024).toFixed(0)}k` : `${f.size}b`}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* File content */}
+                <div className="flex-1 overflow-y-auto">
+                  {openFile ? (
+                    <div className="h-full flex flex-col">
+                      <div className="flex items-center justify-between px-4 py-2 border-b border-white/8 flex-shrink-0">
+                        <span className="text-xs font-mono text-neutral-400">{openFile.path}</span>
+                        <div className="flex items-center gap-3">
+                          <span className="text-[10px] text-neutral-700">{(openFile.size/1024).toFixed(1)} KB</span>
+                          <button onClick={() => navigator.clipboard.writeText(openFile.content)}
+                            className="text-[10px] text-neutral-700 hover:text-white transition-colors">copy</button>
+                          <a href={openFile.html_url} target="_blank" rel="noopener noreferrer"
+                            className="text-[10px] text-neutral-700 hover:text-white transition-colors">open in GitHub ↗</a>
+                        </div>
+                      </div>
+                      <div className="flex-1 overflow-auto">
+                        <SyntaxHighlighter
+                          style={atomDark}
+                          language={langForFile(openFile.name)}
+                          showLineNumbers
+                          lineNumberStyle={{ color: "#374151", fontSize: "11px", userSelect: "none" }}
+                          customStyle={{ margin: 0, background: "transparent", fontSize: "12px", lineHeight: "1.6" }}>
+                          {openFile.content}
+                        </SyntaxHighlighter>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-neutral-800 text-sm">
+                      Select a file to view
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* COMMITS */}
+            {view === "commits" && (
+              <div className="flex-1 overflow-y-auto">
+                <div className="max-w-3xl mx-auto px-5 py-5 space-y-2">
+                  {loading && <div className="flex justify-center py-8"><Loader2 className="w-5 h-5 text-neutral-600 animate-spin" /></div>}
+                  {commits.map(c => (
+                    <div key={c.sha} className="flex items-start gap-4 p-4 bg-white/[0.02] border border-white/8 rounded-2xl hover:border-white/15 transition-colors group">
+                      <img src={c.author_avatar || `https://github.com/${c.author_login}.png`} alt=""
+                        className="w-8 h-8 rounded-full flex-shrink-0 mt-0.5" onError={e => (e.currentTarget.style.display = "none")} />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-neutral-200 font-medium leading-snug mb-1">{c.message}</div>
+                        <div className="flex items-center gap-2 text-[10px] text-neutral-700">
+                          <span>{c.author_name || c.author_login}</span>
+                          <span>·</span>
+                          <span>{c.date ? new Date(c.date).toLocaleDateString() : ""}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <span className="text-[10px] font-mono text-neutral-700 bg-white/5 px-2 py-1 rounded">{c.sha_short}</span>
+                        <a href={c.html_url} target="_blank" rel="noopener noreferrer"
+                          className="opacity-0 group-hover:opacity-100 transition-opacity">
+                          <ExternalLink className="w-3.5 h-3.5 text-neutral-600 hover:text-white" />
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* PULL REQUESTS */}
+            {view === "pulls" && (
+              <div className="flex flex-1 min-h-0">
+                {/* PR list */}
+                <div className="w-80 border-r border-white/8 flex flex-col flex-shrink-0">
+                  <div className="p-3 border-b border-white/8 flex gap-1">
+                    {(["open", "closed"] as const).map(f => (
+                      <button key={f} onClick={() => { setPullFilter(f); setSelectedPR(null); setPrDetail(null); }}
+                        className={cx("flex-1 py-1.5 rounded-lg text-xs font-medium transition-colors capitalize",
+                          pullFilter === f ? "bg-white/10 text-white" : "text-neutral-600 hover:text-neutral-400")}>
+                        {f}
+                      </button>
+                    ))}
+                    <button onClick={() => { if(selectedRepo) { setAiDraftPR(null); setNewPRHead(branches[0]?.name || ""); } }}
+                      className="px-2 py-1.5 rounded-lg text-xs bg-cyan-600 hover:bg-cyan-500 text-white transition-colors">
+                      Draft PR
+                    </button>
+                  </div>
+                  <div className="flex-1 overflow-y-auto py-1">
+                    {loading && <div className="flex justify-center py-4"><Loader2 className="w-4 h-4 text-neutral-700 animate-spin" /></div>}
+                    {pulls.map(p => (
+                      <button key={p.number} onClick={() => loadPRDetail(p)}
+                        className={cx("w-full text-left px-3 py-3 hover:bg-white/5 transition-colors border-b border-white/5",
+                          selectedPR?.number === p.number ? "bg-white/[0.06]" : "")}>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className={cx("text-[10px] px-1.5 py-0.5 rounded-full font-semibold",
+                            p.state === "open" ? "text-green-400 bg-green-500/10" :
+                            p.merged_at ? "text-violet-400 bg-violet-500/10" : "text-red-400 bg-red-500/10")}>
+                            {p.merged_at ? "merged" : p.state}
+                          </span>
+                          {p.draft && <span className="text-[10px] text-neutral-600">draft</span>}
+                          <span className="text-[10px] text-neutral-700 ml-auto">#{p.number}</span>
+                        </div>
+                        <div className="text-xs text-neutral-200 font-medium line-clamp-2 mb-1">{p.title}</div>
+                        <div className="flex items-center gap-2 text-[10px] text-neutral-700">
+                          <span className="font-mono">{p.head_ref}</span>
+                          <span>→</span>
+                          <span className="font-mono">{p.base_ref}</span>
+                        </div>
+                        {p.additions !== undefined && (
+                          <div className="text-[10px] mt-1">
+                            <span className="text-green-600">+{p.additions}</span>
+                            <span className="text-neutral-700"> / </span>
+                            <span className="text-red-600">-{p.deletions}</span>
+                          </div>
+                        )}
+                      </button>
+                    ))}
+                    {!loading && pulls.length === 0 && (
+                      <div className="text-center py-8 text-neutral-700 text-xs">No {pullFilter} PRs</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* PR detail / AI Draft */}
+                <div className="flex-1 overflow-y-auto p-5">
+                  {/* AI PR Draft form */}
+                  {newPRHead && (
+                    <div className="max-w-2xl mx-auto mb-6 bg-white/[0.02] border border-white/8 rounded-2xl p-5">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-sm font-semibold text-white">AI Draft PR</h3>
+                        <button onClick={() => setNewPRHead("")} className="text-neutral-700 hover:text-neutral-400 text-sm">✕</button>
+                      </div>
+                      <div className="flex gap-3 mb-3">
+                        <div className="flex-1">
+                          <div className="text-[10px] text-neutral-600 mb-1">From branch</div>
+                          <select value={newPRHead} onChange={e => setNewPRHead(e.target.value)}
+                            className="w-full bg-neutral-950 border border-white/8 rounded-xl px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-cyan-600/50">
+                            {branches.map(b => <option key={b.name}>{b.name}</option>)}
+                          </select>
+                        </div>
+                        <div className="flex-1">
+                          <div className="text-[10px] text-neutral-600 mb-1">Into base</div>
+                          <select value={newPRBase} onChange={e => setNewPRBase(e.target.value)}
+                            className="w-full bg-neutral-950 border border-white/8 rounded-xl px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-cyan-600/50">
+                            {branches.map(b => <option key={b.name}>{b.name}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <button onClick={draftPR} disabled={aiDraftingPR}
+                        className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-xs font-semibold rounded-xl transition-colors flex items-center gap-2">
+                        {aiDraftingPR ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                        Generate with AI
+                      </button>
+                      {aiDraftPR && (
+                        <div className="mt-4 space-y-3">
+                          <div>
+                            <div className="text-[10px] text-neutral-600 mb-1">Title</div>
+                            <input value={aiDraftPR.title} onChange={e => setAiDraftPR((p: any) => ({...p, title: e.target.value}))}
+                              className="w-full bg-neutral-950 border border-white/8 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-600/50" />
+                          </div>
+                          <div>
+                            <div className="text-[10px] text-neutral-600 mb-1">Body</div>
+                            <textarea value={aiDraftPR.body} onChange={e => setAiDraftPR((p: any) => ({...p, body: e.target.value}))}
+                              rows={8}
+                              className="w-full bg-neutral-950 border border-white/8 rounded-xl px-3 py-2 text-sm text-neutral-300 font-mono resize-none focus:outline-none focus:border-cyan-600/50" />
+                          </div>
+                          <button onClick={async () => {
+                            const [owner, repo] = selectedRepo.full_name.split("/");
+                            try {
+                              await apiFetch(`/github/repos/${owner}/${repo}/pulls`, {
+                                method: "POST",
+                                body: JSON.stringify({ title: aiDraftPR.title, body: aiDraftPR.body, head: newPRHead, base: newPRBase }),
+                              });
+                              toast.success("PR created!");
+                              setNewPRHead("");
+                              setAiDraftPR(null);
+                              loadPulls();
+                            } catch (e: any) { toast.error(e.message); }
+                          }} className="px-4 py-2 bg-green-700 hover:bg-green-600 text-white text-xs font-semibold rounded-xl transition-colors">
+                            Create PR on GitHub
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {prDetail ? (
+                    <div className="max-w-2xl mx-auto space-y-5">
+                      <div>
+                        <div className="flex items-center gap-3 mb-1">
+                          <span className={cx("text-xs px-2 py-0.5 rounded-full font-semibold",
+                            prDetail.state === "open" ? "text-green-400 bg-green-500/10 border border-green-500/20" :
+                            prDetail.merged_at ? "text-violet-400 bg-violet-500/10 border border-violet-500/20" :
+                            "text-red-400 bg-red-500/10 border border-red-500/20")}>
+                            {prDetail.merged_at ? "merged" : prDetail.state}
+                          </span>
+                          <h2 className="text-base font-bold text-white">{prDetail.title}</h2>
+                          <span className="text-neutral-700 text-sm">#{prDetail.number}</span>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs text-neutral-600 mb-3">
+                          <span className="font-mono text-cyan-700">{prDetail.head_ref}</span>
+                          <span>→</span>
+                          <span className="font-mono">{prDetail.base_ref}</span>
+                          <span>by @{prDetail.user_login}</span>
+                          <span className="text-green-600">+{prDetail.additions}</span>
+                          <span className="text-red-600">-{prDetail.deletions}</span>
+                          <span>{prDetail.changed_files} files</span>
+                        </div>
+                        {prDetail.body && (
+                          <div className="bg-white/[0.02] border border-white/8 rounded-xl p-4 text-sm text-neutral-400 leading-relaxed mb-3">
+                            <ReactMarkdown>{prDetail.body}</ReactMarkdown>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* AI Review button */}
+                      <div className="flex items-center gap-3">
+                        <button onClick={runAiReview} disabled={aiRunning}
+                          className="flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-40 text-white text-xs font-semibold rounded-xl transition-colors">
+                          {aiRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                          AI Review
+                        </button>
+                        <a href={prDetail.html_url} target="_blank" rel="noopener noreferrer"
+                          className="flex items-center gap-1.5 px-4 py-2 bg-white/8 hover:bg-white/12 text-white text-xs rounded-xl transition-colors">
+                          <ExternalLink className="w-3.5 h-3.5" /> Open on GitHub
+                        </a>
+                      </div>
+
+                      {/* AI Review output */}
+                      {aiReview && (
+                        <div className="bg-violet-950/30 border border-violet-800/30 rounded-2xl p-5">
+                          <div className="flex items-center gap-2 mb-3">
+                            <Sparkles className="w-4 h-4 text-violet-400" />
+                            <span className="text-sm font-semibold text-violet-300">AI Code Review</span>
+                          </div>
+                          <div className="text-sm text-neutral-300 leading-relaxed">
+                            <ReactMarkdown components={{
+                              code({ inline, className, children, ...props }: any) {
+                                const lang = /language-(\w+)/.exec(className || "")?.[1];
+                                return !inline && lang
+                                  ? <SyntaxHighlighter style={atomDark} language={lang} PreTag="div" className="!text-xs !rounded-xl !my-2">{String(children)}</SyntaxHighlighter>
+                                  : <code className="bg-neutral-800 text-violet-300 rounded px-1 text-xs font-mono" {...props}>{children}</code>;
+                              },
+                              p: ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
+                              h2: ({children}) => <h2 className="text-sm font-bold text-white mt-3 mb-1">{children}</h2>,
+                              h3: ({children}) => <h3 className="text-sm font-semibold text-neutral-200 mt-2 mb-1">{children}</h3>,
+                              strong: ({children}) => <strong className="text-white">{children}</strong>,
+                            }}>{aiReview}</ReactMarkdown>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Changed files */}
+                      {prDetail.files && prDetail.files.length > 0 && (
+                        <div className="bg-white/[0.02] border border-white/8 rounded-2xl p-4">
+                          <h3 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-3">
+                            Changed Files ({prDetail.changed_files})
+                          </h3>
+                          <div className="space-y-1">
+                            {prDetail.files.slice(0, 20).map((f: any) => (
+                              <div key={f.filename} className="flex items-center gap-3 text-xs py-1">
+                                <span className={cx("text-[10px] px-1.5 rounded font-semibold",
+                                  f.status === "added" ? "text-green-400 bg-green-500/10" :
+                                  f.status === "removed" ? "text-red-400 bg-red-500/10" :
+                                  f.status === "renamed" ? "text-yellow-400 bg-yellow-500/10" :
+                                  "text-blue-400 bg-blue-500/10")}>
+                                  {f.status[0].toUpperCase()}
+                                </span>
+                                <span className="text-neutral-400 font-mono flex-1 truncate">{f.filename}</span>
+                                <span className="text-green-600 flex-shrink-0">+{f.additions}</span>
+                                <span className="text-red-600 flex-shrink-0">-{f.deletions}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : !newPRHead && (
+                    <div className="flex items-center justify-center h-full text-neutral-800 text-sm">
+                      Select a PR to review
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* ISSUES */}
+            {view === "issues" && (
+              <div className="flex-1 overflow-y-auto">
+                <div className="max-w-3xl mx-auto px-5 py-4">
+                  <div className="flex gap-1 mb-4">
+                    {(["open", "closed"] as const).map(f => (
+                      <button key={f} onClick={() => setIssueFilter(f)}
+                        className={cx("px-3 py-1.5 rounded-lg text-xs font-medium transition-colors capitalize",
+                          issueFilter === f ? "bg-white/10 text-white" : "text-neutral-600 hover:text-neutral-400")}>
+                        {f}
+                      </button>
+                    ))}
+                  </div>
+                  {loading && <div className="flex justify-center py-8"><Loader2 className="w-5 h-5 text-neutral-600 animate-spin" /></div>}
+                  <div className="space-y-2">
+                    {issues.map(i => (
+                      <div key={i.number} className="bg-white/[0.02] border border-white/8 rounded-2xl p-4 hover:border-white/15 transition-colors">
+                        <div className="flex items-start gap-3">
+                          <div className={cx("w-3 h-3 rounded-full mt-1 flex-shrink-0",
+                            i.state === "open" ? "bg-green-400" : "bg-purple-400")} />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <a href={i.html_url} target="_blank" rel="noopener noreferrer"
+                                className="text-sm font-semibold text-white hover:text-cyan-400 transition-colors">
+                                {i.title}
+                              </a>
+                              {i.labels.map((l: any) => (
+                                <span key={l.name} className="text-[9px] px-1.5 py-0.5 rounded-full"
+                                  style={{ background: `#${l.color}20`, color: `#${l.color}`, border: `1px solid #${l.color}40` }}>
+                                  {l.name}
+                                </span>
+                              ))}
+                            </div>
+                            {i.body_preview && (
+                              <p className="text-xs text-neutral-600 mb-1.5 line-clamp-2">{i.body_preview}</p>
+                            )}
+                            <div className="flex items-center gap-3 text-[10px] text-neutral-700">
+                              <span>#{i.number}</span>
+                              <span>@{i.user_login}</span>
+                              <span>{new Date(i.updated_at).toLocaleDateString()}</span>
+                              {i.comments > 0 && <span>💬 {i.comments}</span>}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                    {!loading && issues.length === 0 && (
+                      <div className="text-center py-10 text-neutral-700 text-sm">No {issueFilter} issues</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DOCKER PAGE — Container management, logs, image hub, compose stacks
+// ══════════════════════════════════════════════════════════════════════════════
+type DockerView = "containers" | "images" | "compose" | "system";
+
+function DockerPage() {
+  const [dockerStatus, setDockerStatus] = useState<any>(null);
+  const [view, setView] = useState<DockerView>("containers");
+  const [containers, setContainers] = useState<any[]>([]);
+  const [images, setImages] = useState<any[]>([]);
+  const [volumes, setVolumes] = useState<any[]>([]);
+  const [networks, setNetworks] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [showAll, setShowAll] = useState(true);
+  const [selectedContainer, setSelectedContainer] = useState<any>(null);
+  const [containerDetail, setContainerDetail] = useState<any>(null);
+  const [logs, setLogs] = useState("");
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [imgSearch, setImgSearch] = useState("");
+  const [imgSearchResults, setImgSearchResults] = useState<any[]>([]);
+  const [pulling, setPulling] = useState<Record<string, string>>({});
+  const [sysInfo, setSysInfo] = useState<any>(null);
+
+  const loadStatus = async () => {
+    try {
+      const s = await apiFetch("/docker/status");
+      setDockerStatus(s);
+    } catch {}
+  };
+
+  const loadContainers = async () => {
+    setLoading(true);
+    try {
+      const c = await apiFetch(`/docker/containers?all=${showAll}`);
+      setContainers(c);
+    } catch {}
+    setLoading(false);
+  };
+
+  const loadImages = async () => {
+    setLoading(true);
+    try {
+      const i = await apiFetch("/docker/images");
+      setImages(i);
+    } catch {}
+    setLoading(false);
+  };
+
+  const loadSysInfo = async () => {
+    try {
+      const [vol, net, df] = await Promise.all([
+        apiFetch("/docker/volumes"),
+        apiFetch("/docker/networks"),
+        apiFetch("/docker/system/df"),
+      ]);
+      setVolumes(vol);
+      setNetworks(net);
+      setSysInfo(df);
+    } catch {}
+  };
+
+  useEffect(() => { loadStatus(); }, []);
+  useEffect(() => { if (view === "containers") loadContainers(); }, [view, showAll]);
+  useEffect(() => { if (view === "images") loadImages(); }, [view]);
+  useEffect(() => { if (view === "system") loadSysInfo(); }, [view]);
+
+  const selectContainer = async (c: any) => {
+    setSelectedContainer(c);
+    setContainerDetail(null);
+    setLogs("");
+    try {
+      const [detail, logs] = await Promise.all([
+        apiFetch(`/docker/containers/${c.id}`),
+        apiFetch(`/docker/containers/${c.id}/logs?tail=150`),
+      ]);
+      setContainerDetail(detail);
+      setLogs(logs.logs || "");
+    } catch {}
+  };
+
+  const containerAction = async (id: string, action: "start" | "stop" | "restart") => {
+    try {
+      await apiFetch(`/docker/containers/${id}/${action}`, { method: "POST" });
+      toast.success(`Container ${action}ed`);
+      loadContainers();
+      if (selectedContainer?.id === id) {
+        setTimeout(() => selectContainer({ ...selectedContainer }), 500);
+      }
+    } catch (e: any) { toast.error(e.message); }
+  };
+
+  const removeContainer = async (id: string) => {
+    if (!confirm("Remove this container?")) return;
+    try {
+      await apiFetch(`/docker/containers/${id}?force=true`, { method: "DELETE" });
+      toast.success("Container removed");
+      setSelectedContainer(null);
+      loadContainers();
+    } catch (e: any) { toast.error(e.message); }
+  };
+
+  const pullImage = async (image: string) => {
+    setPulling(p => ({ ...p, [image]: "Pulling…" }));
+    try {
+      const r = await fetch(`${API}/docker/images/pull?image=${encodeURIComponent(image)}`, { method: "POST" });
+      const reader = r.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n"); buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.line) setPulling(p => ({ ...p, [image]: evt.line }));
+            if (evt.done) {
+              if (evt.success) {
+                toast.success(`Pulled ${image}`);
+                setPulling(p => { const n = {...p}; delete n[image]; return n; });
+                loadImages();
+              } else {
+                toast.error(`Failed to pull ${image}`);
+                setPulling(p => { const n = {...p}; delete n[image]; return n; });
+              }
+            }
+          } catch {}
+        }
+      }
+    } catch (e: any) {
+      toast.error(e.message);
+      setPulling(p => { const n = {...p}; delete n[image]; return n; });
+    }
+  };
+
+  const searchImages = async () => {
+    if (!imgSearch.trim()) return;
+    setLoading(true);
+    try {
+      const r = await apiFetch(`/docker/images/search?q=${encodeURIComponent(imgSearch)}&limit=10`);
+      setImgSearchResults(r);
+    } catch {}
+    setLoading(false);
+  };
+
+  const removeImage = async (id: string, name: string) => {
+    if (!confirm(`Remove image ${name}?`)) return;
+    try {
+      await apiFetch(`/docker/images/${encodeURIComponent(name)}?force=true`, { method: "DELETE" });
+      toast.success("Image removed");
+      loadImages();
+    } catch (e: any) { toast.error(e.message); }
+  };
+
+  // State badge
+  const stateColor = (state: string) => {
+    if (state === "running") return "text-green-400 bg-green-500/10 border-green-500/25";
+    if (state === "exited") return "text-neutral-600 bg-white/5 border-white/8";
+    if (state === "paused") return "text-yellow-400 bg-yellow-500/10 border-yellow-500/25";
+    return "text-neutral-500 bg-white/5 border-white/8";
+  };
+
+  if (dockerStatus && !dockerStatus.available) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-[#080809]">
+        <div className="max-w-md text-center mx-4">
+          <div className="w-20 h-20 bg-white/[0.03] border border-white/10 rounded-3xl flex items-center justify-center mx-auto mb-5">
+            <span className="text-4xl">🐳</span>
+          </div>
+          <h1 className="text-2xl font-bold text-white mb-2">Docker not available</h1>
+          <p className="text-neutral-500 text-sm mb-4">{dockerStatus.message}</p>
+          <div className="bg-white/[0.02] border border-white/8 rounded-2xl p-5 text-left space-y-3 text-xs text-neutral-500">
+            <p className="font-semibold text-neutral-400">To enable Docker integration:</p>
+            <p>In docker-compose.yml, the backend mounts <span className="font-mono text-neutral-400">/var/run/docker.sock</span></p>
+            <p>Or run the server on a host with Docker installed</p>
+            <code className="block bg-neutral-950 rounded-lg p-3 text-neutral-400 font-mono">docker compose up -d</code>
+          </div>
+          <button onClick={loadStatus} className="mt-4 px-4 py-2 bg-white/8 hover:bg-white/12 text-white text-sm rounded-xl transition-colors">
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full bg-[#080809]">
+      {/* Left sidebar */}
+      <div className="w-56 flex-shrink-0 border-r border-white/8 flex flex-col">
+        {/* Docker status header */}
+        <div className="p-3 border-b border-white/8">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-2xl">🐳</span>
+            <div>
+              <div className="text-xs font-bold text-white">Docker</div>
+              {dockerStatus?.version && <div className="text-[10px] text-neutral-600 font-mono">{dockerStatus.version}</div>}
+            </div>
+            <div className={cx("w-2 h-2 rounded-full ml-auto", dockerStatus?.available ? "bg-green-400 animate-pulse" : "bg-neutral-700")} />
+          </div>
+          {dockerStatus?.available && (
+            <div className="grid grid-cols-3 gap-1 text-center">
+              {[
+                { v: dockerStatus.containers_running, l: "running", c: "text-green-400" },
+                { v: dockerStatus.containers_stopped, l: "stopped", c: "text-neutral-600" },
+                { v: dockerStatus.images, l: "images", c: "text-blue-400" },
+              ].map(item => (
+                <div key={item.l} className="bg-white/[0.03] rounded-lg py-1.5">
+                  <div className={cx("text-sm font-bold", item.c)}>{item.v}</div>
+                  <div className="text-[9px] text-neutral-700">{item.l}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* View tabs */}
+        <nav className="p-2 space-y-0.5">
+          {([
+            { id: "containers", label: "Containers", icon: "📦" },
+            { id: "images", label: "Images", icon: "🏷️" },
+            { id: "compose", label: "Compose", icon: "🎼" },
+            { id: "system", label: "System", icon: "📊" },
+          ] as const).map(tab => (
+            <button key={tab.id} onClick={() => setView(tab.id)}
+              className={cx("w-full text-left px-3 py-2 rounded-xl flex items-center gap-2.5 text-xs font-medium transition-colors",
+                view === tab.id ? "bg-white/10 text-white" : "text-neutral-600 hover:text-neutral-300 hover:bg-white/5")}>
+              <span>{tab.icon}</span>
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {/* Main area */}
+      <div className="flex-1 flex min-h-0">
+
+        {/* CONTAINERS */}
+        {view === "containers" && (
+          <>
+            {/* Container list */}
+            <div className="w-72 border-r border-white/8 flex flex-col flex-shrink-0">
+              <div className="p-2 border-b border-white/8 flex items-center gap-2">
+                <button onClick={() => setShowAll(p => !p)}
+                  className={cx("text-[10px] px-2 py-1 rounded-lg transition-colors",
+                    showAll ? "bg-white/10 text-white" : "text-neutral-600 hover:text-neutral-400")}>
+                  All
+                </button>
+                <button onClick={loadContainers} className="ml-auto text-neutral-700 hover:text-neutral-400 transition-colors">
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto py-1">
+                {loading && <div className="flex justify-center py-4"><Loader2 className="w-4 h-4 text-neutral-700 animate-spin" /></div>}
+                {containers.map(c => (
+                  <button key={c.id} onClick={() => selectContainer(c)}
+                    className={cx("w-full text-left px-3 py-2.5 hover:bg-white/5 transition-colors border-b border-white/[0.03]",
+                      selectedContainer?.id === c.id ? "bg-white/[0.06]" : "")}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <div className={cx("w-2 h-2 rounded-full flex-shrink-0",
+                        c.state === "running" ? "bg-green-400 animate-pulse" : "bg-neutral-700")} />
+                      <span className="text-xs font-medium text-neutral-200 truncate">{c.name}</span>
+                    </div>
+                    <div className="text-[10px] text-neutral-600 font-mono truncate pl-4">{c.image}</div>
+                    <div className="text-[10px] text-neutral-700 pl-4 mt-0.5">{c.status}</div>
+                  </button>
+                ))}
+                {!loading && containers.length === 0 && (
+                  <div className="text-center py-8 text-neutral-700 text-xs">No containers</div>
+                )}
+              </div>
+            </div>
+
+            {/* Container detail */}
+            <div className="flex-1 flex flex-col min-h-0">
+              {selectedContainer ? (
+                <>
+                  {/* Header with actions */}
+                  <div className="border-b border-white/8 px-5 py-3 flex items-center gap-3 flex-shrink-0">
+                    <div className={cx("w-2.5 h-2.5 rounded-full flex-shrink-0",
+                      selectedContainer.state === "running" ? "bg-green-400 animate-pulse" : "bg-neutral-700")} />
+                    <span className="text-sm font-bold text-white">{selectedContainer.name}</span>
+                    <span className={cx("text-[10px] px-2 py-0.5 rounded-full border", stateColor(selectedContainer.state))}>
+                      {selectedContainer.state}
+                    </span>
+                    <div className="ml-auto flex items-center gap-2">
+                      {selectedContainer.state !== "running" ? (
+                        <button onClick={() => containerAction(selectedContainer.id, "start")}
+                          className="px-3 py-1.5 bg-green-700 hover:bg-green-600 text-white text-xs font-semibold rounded-lg transition-colors">
+                          Start
+                        </button>
+                      ) : (
+                        <>
+                          <button onClick={() => containerAction(selectedContainer.id, "restart")}
+                            className="px-3 py-1.5 bg-white/8 hover:bg-white/12 text-white text-xs rounded-lg transition-colors">
+                            Restart
+                          </button>
+                          <button onClick={() => containerAction(selectedContainer.id, "stop")}
+                            className="px-3 py-1.5 bg-amber-700 hover:bg-amber-600 text-white text-xs rounded-lg transition-colors">
+                            Stop
+                          </button>
+                        </>
+                      )}
+                      <button onClick={() => removeContainer(selectedContainer.id)}
+                        className="px-3 py-1.5 bg-red-900/50 hover:bg-red-800/60 text-red-400 text-xs rounded-lg border border-red-700/40 transition-colors">
+                        Remove
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-5 space-y-5">
+                    {containerDetail && (
+                      <>
+                        {/* Info grid */}
+                        <div className="grid grid-cols-3 gap-3">
+                          {[
+                            { label: "Image", value: containerDetail.image || selectedContainer.image },
+                            { label: "PID", value: containerDetail.pid || "—" },
+                            { label: "Restart", value: containerDetail.restart_policy || "—" },
+                          ].map(item => (
+                            <div key={item.label} className="bg-white/[0.02] border border-white/8 rounded-xl p-3">
+                              <div className="text-[10px] text-neutral-600 mb-1">{item.label}</div>
+                              <div className="text-xs text-neutral-300 font-mono truncate">{item.value}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Ports */}
+                        {containerDetail.ports && Object.keys(containerDetail.ports).length > 0 && (
+                          <div className="bg-white/[0.02] border border-white/8 rounded-xl p-4">
+                            <div className="text-[10px] text-neutral-600 mb-2 uppercase tracking-wider">Ports</div>
+                            <div className="space-y-1">
+                              {Object.entries(containerDetail.ports).map(([k, v]: [string, any]) => (
+                                <div key={k} className="flex items-center gap-2 text-xs font-mono">
+                                  <span className="text-cyan-400">
+                                    {Array.isArray(v) && v[0] ? `${v[0].HostPort}` : "—"}
+                                  </span>
+                                  <span className="text-neutral-700">→</span>
+                                  <span className="text-neutral-400">{k}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Mounts */}
+                        {containerDetail.mounts && containerDetail.mounts.length > 0 && (
+                          <div className="bg-white/[0.02] border border-white/8 rounded-xl p-4">
+                            <div className="text-[10px] text-neutral-600 mb-2 uppercase tracking-wider">Mounts</div>
+                            <div className="space-y-1.5">
+                              {containerDetail.mounts.map((m: any, i: number) => (
+                                <div key={i} className="text-[11px] font-mono">
+                                  <span className="text-neutral-500">{m.source}</span>
+                                  <span className="text-neutral-700 mx-1">→</span>
+                                  <span className="text-neutral-400">{m.destination}</span>
+                                  <span className="text-neutral-700 ml-1">({m.type})</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {/* Logs */}
+                    <div className="bg-neutral-950 border border-white/8 rounded-2xl overflow-hidden">
+                      <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/8">
+                        <span className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">Logs</span>
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => { if(selectedContainer) selectContainer(selectedContainer); }}
+                            className="text-[10px] text-neutral-700 hover:text-neutral-400 transition-colors">refresh</button>
+                          <button onClick={() => navigator.clipboard.writeText(logs)}
+                            className="text-[10px] text-neutral-700 hover:text-neutral-400 transition-colors">copy</button>
+                        </div>
+                      </div>
+                      <div className="overflow-y-auto max-h-80 p-4">
+                        {logs ? (
+                          <pre className="text-[11px] text-neutral-400 font-mono leading-relaxed whitespace-pre-wrap break-all">
+                            {logs}
+                          </pre>
+                        ) : (
+                          <div className="text-neutral-700 text-xs text-center py-4">No logs</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="flex-1 flex items-center justify-center text-neutral-800 text-sm">
+                  Select a container
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* IMAGES */}
+        {view === "images" && (
+          <div className="flex-1 overflow-y-auto">
+            <div className="max-w-4xl mx-auto px-6 py-6 space-y-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-bold text-white">Images ({images.length})</h2>
+                <button onClick={loadImages} className="text-neutral-700 hover:text-neutral-400 transition-colors">
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Pull / search */}
+              <div className="bg-white/[0.02] border border-white/8 rounded-2xl p-5">
+                <h3 className="text-sm font-semibold text-white mb-3">Pull Image</h3>
+                <div className="flex gap-2">
+                  <input value={imgSearch} onChange={e => setImgSearch(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && searchImages()}
+                    placeholder="Search Docker Hub (e.g. nginx, postgres:16)"
+                    className="flex-1 bg-neutral-950 border border-white/8 rounded-xl px-4 py-2.5 text-sm text-white placeholder-neutral-700 focus:outline-none focus:border-cyan-600/50 font-mono" />
+                  <button onClick={searchImages} disabled={!imgSearch.trim()}
+                    className="px-4 py-2.5 bg-white/8 hover:bg-white/12 disabled:opacity-40 text-white text-xs font-semibold rounded-xl transition-colors">
+                    Search
+                  </button>
+                  <button onClick={() => imgSearch && pullImage(imgSearch)} disabled={!imgSearch.trim()}
+                    className="px-4 py-2.5 bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-white text-xs font-semibold rounded-xl transition-colors">
+                    Pull
+                  </button>
+                </div>
+
+                {/* Pull progress */}
+                {Object.entries(pulling).map(([img, status]) => (
+                  <div key={img} className="mt-3 flex items-center gap-3">
+                    <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin flex-shrink-0" />
+                    <div>
+                      <div className="text-xs font-mono text-white">{img}</div>
+                      <div className="text-[10px] text-neutral-600">{status}</div>
+                    </div>
+                  </div>
+                ))}
+
+                {/* Search results */}
+                {imgSearchResults.length > 0 && (
+                  <div className="mt-4 space-y-2">
+                    {imgSearchResults.map((r: any) => (
+                      <div key={r.name} className="flex items-center gap-3 py-2 border-t border-white/5">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-mono text-white flex items-center gap-2">
+                            {r.name}
+                            {r.official === "true" && <span className="text-[9px] text-blue-400 border border-blue-500/30 px-1 rounded">Official</span>}
+                          </div>
+                          <div className="text-[10px] text-neutral-600 truncate">{r.description}</div>
+                        </div>
+                        <span className="text-[10px] text-neutral-700">⭐ {r.stars}</span>
+                        <button onClick={() => pullImage(r.name)}
+                          disabled={!!pulling[r.name]}
+                          className="text-[10px] px-2.5 py-1 bg-blue-800 hover:bg-blue-700 disabled:opacity-40 text-white rounded-lg transition-colors">
+                          Pull
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Local images */}
+              <div className="space-y-2">
+                {images.map((img, i) => (
+                  <div key={i} className="bg-white/[0.02] border border-white/8 rounded-2xl px-4 py-3 flex items-center gap-4 hover:border-white/15 transition-colors">
+                    <span className="text-2xl flex-shrink-0">🏷️</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-mono text-white truncate">{img.repository}</span>
+                        <span className="text-[10px] font-mono text-cyan-700 bg-cyan-900/20 border border-cyan-800/30 px-1.5 py-0.5 rounded flex-shrink-0">
+                          {img.tag}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-neutral-700 font-mono mt-0.5">{img.id} · {img.size}</div>
+                    </div>
+                    <div className="text-[10px] text-neutral-700 flex-shrink-0">
+                      {img.created ? new Date(img.created).toLocaleDateString() : ""}
+                    </div>
+                    <button onClick={() => removeImage(img.id, `${img.repository}:${img.tag}`)}
+                      className="text-neutral-700 hover:text-red-400 transition-colors flex-shrink-0">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* SYSTEM */}
+        {view === "system" && (
+          <div className="flex-1 overflow-y-auto">
+            <div className="max-w-3xl mx-auto px-6 py-6 space-y-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-bold text-white">System</h2>
+                <div className="flex gap-2">
+                  <button onClick={async () => {
+                    if (!confirm("Prune all stopped containers, unused images, and networks?")) return;
+                    const r = await apiFetch("/docker/system/prune", { method: "POST" });
+                    toast.success("Pruned: " + (r.output || "done"));
+                    loadSysInfo();
+                  }} className="text-xs px-3 py-1.5 bg-red-900/30 border border-red-700/40 text-red-400 hover:bg-red-900/50 rounded-xl transition-colors">
+                    Prune unused
+                  </button>
+                </div>
+              </div>
+
+              {dockerStatus && (
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { label: "OS", value: dockerStatus.os },
+                    { label: "Architecture", value: dockerStatus.arch },
+                    { label: "Engine", value: `Docker ${dockerStatus.version}` },
+                    { label: "Storage Driver", value: dockerStatus.driver },
+                    { label: "CPUs", value: dockerStatus.cpus },
+                    { label: "Memory", value: dockerStatus.memory_total ? `${(dockerStatus.memory_total / 1e9).toFixed(1)} GB` : "—" },
+                  ].map(item => (
+                    <div key={item.label} className="bg-white/[0.02] border border-white/8 rounded-xl p-3">
+                      <div className="text-[10px] text-neutral-600 mb-1">{item.label}</div>
+                      <div className="text-sm font-semibold text-white">{item.value}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Volumes */}
+              <div>
+                <h3 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-3">Volumes ({volumes.length})</h3>
+                <div className="space-y-2">
+                  {volumes.map((v: any) => (
+                    <div key={v.Name || v.name} className="flex items-center gap-3 bg-white/[0.02] border border-white/8 rounded-xl px-4 py-2.5">
+                      <span className="text-sm">📦</span>
+                      <span className="text-xs font-mono text-neutral-300 flex-1 truncate">{v.Name || v.name}</span>
+                      <span className="text-[10px] text-neutral-700">{v.Driver || v.driver}</span>
+                      <button onClick={async () => {
+                        const name = v.Name || v.name;
+                        if (!confirm(`Remove volume ${name}?`)) return;
+                        try { await apiFetch(`/docker/volumes/${name}`, { method: "DELETE" }); toast.success("Volume removed"); loadSysInfo(); }
+                        catch (e: any) { toast.error(e.message); }
+                      }} className="text-neutral-700 hover:text-red-400 transition-colors">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  {volumes.length === 0 && <div className="text-xs text-neutral-700 text-center py-4">No volumes</div>}
+                </div>
+              </div>
+
+              {/* Networks */}
+              <div>
+                <h3 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-3">Networks ({networks.length})</h3>
+                <div className="space-y-2">
+                  {networks.map((n: any) => (
+                    <div key={n.id} className="flex items-center gap-3 bg-white/[0.02] border border-white/8 rounded-xl px-4 py-2.5">
+                      <span className="text-sm">🌐</span>
+                      <span className="text-xs font-medium text-neutral-300 flex-1">{n.name}</span>
+                      <span className="text-[10px] font-mono text-neutral-700">{n.driver}</span>
+                      <span className="text-[10px] text-neutral-700">{n.scope}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Compose stacks */}
+              <DockerCompose />
+            </div>
+          </div>
+        )}
+
+        {/* COMPOSE TAB */}
+        {view === "compose" && (
+          <div className="flex-1 overflow-y-auto">
+            <div className="max-w-3xl mx-auto px-6 py-6">
+              <DockerCompose />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DockerCompose() {
+  const [composeFile] = useState("/home/claude/agentflow-v2/docker-compose.yml");
+  const [services, setServices] = useState<any[]>([]);
+  const [upLog, setUpLog] = useState("");
+  const [upRunning, setUpRunning] = useState(false);
+
+  const loadServices = async () => {
+    try {
+      const r = await apiFetch(`/docker/compose/ps?compose_file=${encodeURIComponent(composeFile)}`);
+      setServices(Array.isArray(r) ? r : []);
+    } catch {}
+  };
+
+  useEffect(() => { loadServices(); }, []);
+
+  const composeUp = async (down = false) => {
+    setUpRunning(true);
+    setUpLog("");
+    try {
+      const url = down
+        ? `/docker/compose/down?compose_file=${encodeURIComponent(composeFile)}`
+        : `/docker/compose/up?compose_file=${encodeURIComponent(composeFile)}&detach=true`;
+      if (down) {
+        const r = await apiFetch(url, { method: "POST" });
+        setUpLog(r.output || r.error || "done");
+        setUpRunning(false);
+        loadServices();
+        return;
+      }
+      const res = await fetch(`${API}${url}`, { method: "POST" });
+      const reader = res.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n"); buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.line) setUpLog(p => p + evt.line + "\n");
+            if (evt.done) { loadServices(); }
+          } catch {}
+        }
+      }
+    } catch (e: any) { setUpLog(`Error: ${e.message}`); }
+    setUpRunning(false);
+  };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Compose Stack</h3>
+        <div className="flex gap-2">
+          <button onClick={() => composeUp(false)} disabled={upRunning}
+            className="px-3 py-1.5 bg-green-800 hover:bg-green-700 disabled:opacity-40 text-white text-xs font-semibold rounded-xl transition-colors flex items-center gap-1.5">
+            {upRunning ? <Loader2 className="w-3 h-3 animate-spin" /> : null} Up
+          </button>
+          <button onClick={() => composeUp(true)} disabled={upRunning}
+            className="px-3 py-1.5 bg-red-900/50 border border-red-700/40 text-red-400 hover:bg-red-900/70 text-xs font-semibold rounded-xl transition-colors disabled:opacity-40">
+            Down
+          </button>
+          <button onClick={loadServices} className="text-neutral-700 hover:text-neutral-400 transition-colors">
+            <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+
+      <div className="text-[10px] font-mono text-neutral-700 mb-3 bg-white/[0.02] border border-white/5 rounded-lg px-3 py-2">
+        {composeFile}
+      </div>
+
+      {services.length > 0 && (
+        <div className="space-y-2 mb-4">
+          {services.map((s: any, i) => (
+            <div key={i} className="flex items-center gap-3 bg-white/[0.02] border border-white/8 rounded-xl px-3 py-2.5">
+              <div className={cx("w-2 h-2 rounded-full flex-shrink-0",
+                s.State === "running" ? "bg-green-400 animate-pulse" : "bg-neutral-700")} />
+              <span className="text-xs font-medium text-neutral-300">{s.Service || s.Name}</span>
+              <span className="text-[10px] text-neutral-600 font-mono">{s.Image}</span>
+              <span className="text-[10px] text-neutral-700 ml-auto">{s.State || s.Status}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {upLog && (
+        <div className="bg-neutral-950 border border-white/8 rounded-xl p-4 max-h-48 overflow-y-auto">
+          <pre className="text-[10px] font-mono text-neutral-500 leading-relaxed whitespace-pre-wrap">{upLog}</pre>
+        </div>
+      )}
     </div>
   );
 }
@@ -3348,6 +4801,8 @@ export default function App() {
         {page === "mcp"       && <MCPPage />}
         {page === "knowledge" && <KnowledgePage />}
         {page === "openclaw"  && <OpenClawPage />}
+        {page === "github"    && <GitHubPage />}
+        {page === "docker"    && <DockerPage />}
         {page === "settings"  && <SettingsPage stats={stats} />}
       </div>
     </div>

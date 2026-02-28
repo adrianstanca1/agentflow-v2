@@ -208,7 +208,10 @@ services:
       ollama: {condition: service_healthy}
     ports: ["8000:8000"]
     networks: [agentflow]
-    volumes: [workspace:/tmp/agentflow_ws]
+    volumes:
+      - workspace:/tmp/agentflow_ws
+      - /var/run/docker.sock:/var/run/docker.sock  # Docker integration
+      - .:/app/workspace:ro  # Compose file access (read-only)
     environment:
       # Core
       ENVIRONMENT: ${ENVIRONMENT:-production}
@@ -244,6 +247,8 @@ services:
       # Search & Tools
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       E2B_API_KEY: ${E2B_API_KEY:-}
+      # GitHub integration
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       # Default models
       DEFAULT_MODEL_LOCAL: ${OLLAMA_DEFAULT_MODEL:-llama3.2:latest}
       DEFAULT_MODEL_CODING: ${DEFAULT_MODEL_CODING:-qwen2.5-coder:7b}
