@@ -45,11 +45,12 @@ interface PopularModel {
 }
 interface StreamEvent {
   event_type: string; content: any; agent_id?: string; agent_name?: string;
-  session_id?: string; metadata?: Record<string, any>;
+  session_id?: string; metadata?: Record<string, any>; model_used?: string;
 }
 interface Message {
   id: string; role: "user" | "agent"; content: string;
   events: StreamEvent[]; agent: string; ts: Date; status: "streaming" | "done" | "error";
+  model?: string;
 }
 interface CloudProvider {
   id: string; name: string; icon: string; color: string; docs: string;
@@ -225,14 +226,42 @@ function ChatPage({ agents }: { agents: AgentInfo[] }) {
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
   const [model, setModel] = useState("");
+  const [provider, setProvider] = useState("");
   const [preferLocal, setPreferLocal] = useState(false);
   const [sideOpen, setSideOpen] = useState(true);
+  const [allProviders, setAllProviders] = useState<any[]>([]);
+  const [providerModels, setProviderModels] = useState<string[]>([]);
+  const [showModelPicker, setShowModelPicker] = useState(false);
+  const [conversations, setConversations] = useState<any[]>([]);
+  const [sessionId] = useState(() => crypto.randomUUID());
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<(() => void) | null>(null);
   const meta = AGENT_META[agentKey] || AGENT_META.assistant;
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  useEffect(() => {
+    // Load configured providers for model picker
+    apiFetch("/openclaw/providers").then((data: any[]) => {
+      const configured = data.filter(p => p.configured);
+      setAllProviders(configured);
+      if (configured.length > 0 && !provider) {
+        const first = configured[0];
+        setProvider(first.id);
+        setModel(first.default_model || "");
+      }
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!provider) return;
+    apiFetch(`/openclaw/models?provider=${provider}`).then((data: any[]) => {
+      const names = data.map(m => m.name);
+      setProviderModels(names);
+      if (names.length > 0 && !model) setModel(names[0]);
+    }).catch(() => {});
+  }, [provider]);
 
   const SUGGESTIONS: Record<string, string[]> = {
     assistant:   ["Explain LangGraph vs CrewAI", "Best prompt engineering practices 2026", "Help me plan a microservices architecture"],
@@ -255,8 +284,13 @@ function ChatPage({ agents }: { agents: AgentInfo[] }) {
       { id: aid, role: "agent", content: "", events: [], agent: agentKey, ts: new Date(), status: "streaming" },
     ]);
     try {
-      const body: any = { agent_key: agentKey, task, stream: true, prefer_local: preferLocal };
+      const body: any = { agent_key: agentKey, task, stream: true, prefer_local: preferLocal, session_id: sessionId };
       if (model) body.model_override = model;
+      // Also store conversation locally
+      setConversations(prev => [...prev.slice(-49), { 
+        id: uid, agent: agentKey, task, ts: new Date().toISOString(),
+        model: model || "auto", provider: provider || "auto"
+      }]);
       const res = await fetch(`${API}/agents/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       if (!res.ok) throw new Error(await res.text());
       const reader = res.body!.getReader(); const dec = new TextDecoder();
@@ -270,10 +304,19 @@ function ChatPage({ agents }: { agents: AgentInfo[] }) {
           if (!line.startsWith("data: ")) continue;
           try {
             const evt: StreamEvent = JSON.parse(line.slice(6)); evts.push(evt);
-            if ((evt.event_type === "output" || evt.event_type === "complete") && typeof evt.content === "string" && evt.content)
-              finalContent = evt.content;
-            setMessages(prev => prev.map(m => m.id === aid ? { ...m, content: finalContent || m.content, events: [...evts],
-              status: evt.event_type === "complete" ? "done" : "streaming" } : m));
+            // Accumulate stream tokens for real-time display
+            if (evt.event_type === "stream_token" && typeof evt.content === "string") {
+              finalContent += evt.content;
+            } else if ((evt.event_type === "output" || evt.event_type === "complete") && typeof evt.content === "string" && evt.content) {
+              finalContent = evt.content; // Use full content from complete event
+            }
+            setMessages(prev => prev.map(m => m.id === aid ? { 
+              ...m, 
+              content: finalContent || m.content, 
+              events: [...evts],
+              status: evt.event_type === "complete" ? "done" : evt.event_type === "error" ? "error" : "streaming",
+              model: evt.model_used || m.model,
+            } : m));
           } catch {}
         }
       }
@@ -282,7 +325,11 @@ function ChatPage({ agents }: { agents: AgentInfo[] }) {
         toast.error(e.message);
         setMessages(prev => prev.map(m => m.id === aid ? { ...m, content: `Error: ${e.message}`, status: "error" } : m));
       }
-    } finally { setRunning(false); abortRef.current = null; inputRef.current?.focus(); }
+    } finally { 
+      setRunning(false); 
+      abortRef.current = null; 
+      inputRef.current?.focus(); 
+    }
   }, [input, running, agentKey, model, preferLocal]);
 
   const agentList = agents.length > 0 ? agents :
@@ -315,6 +362,24 @@ function ChatPage({ agents }: { agents: AgentInfo[] }) {
                 );
               })}
             </div>
+            {/* Conversation history */}
+            {conversations.length > 0 && (
+              <div className="border-t border-neutral-800 px-2 pt-2 pb-1">
+                <p className="text-[10px] text-neutral-700 font-semibold uppercase tracking-wider px-1 mb-1">
+                  Recent · {conversations.length}
+                </p>
+                <div className="space-y-0.5 max-h-32 overflow-y-auto">
+                  {[...conversations].reverse().slice(0, 10).map((c, i) => (
+                    <div key={i}
+                      className="text-[10px] text-neutral-600 hover:text-neutral-400 px-2 py-1 rounded hover:bg-white/4 cursor-pointer truncate transition-colors"
+                      title={c.task}
+                      onClick={() => setInput(c.task)}>
+                      {c.task.slice(0, 40)}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="p-3 border-t border-neutral-800 space-y-2">
               <p className="text-[10px] text-neutral-600 font-medium uppercase tracking-wider">Model Override</p>
               <ModelPicker value={model} onChange={setModel} compact />
@@ -369,15 +434,47 @@ function ChatPage({ agents }: { agents: AgentInfo[] }) {
           <div ref={bottomRef} />
         </div>
 
+        {/* Model picker panel */}
+        {showModelPicker && (
+          <div className="border-t border-neutral-800/60 bg-[#0a0a0c] px-4 py-3">
+            <div className="max-w-2xl mx-auto flex items-center gap-3">
+              <div className="flex-1">
+                <div className="text-[10px] text-neutral-600 mb-1 uppercase tracking-wider">Provider</div>
+                <select value={provider} onChange={e => { setProvider(e.target.value); setModel(""); }}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-2.5 py-1.5 text-xs text-neutral-300 focus:outline-none focus:border-cyan-600">
+                  {allProviders.length > 0
+                    ? allProviders.map((p: any) => <option key={p.id} value={p.id}>{p.icon} {p.name}</option>)
+                    : <option value="">Auto (no providers configured)</option>
+                  }
+                </select>
+              </div>
+              <div className="flex-1">
+                <div className="text-[10px] text-neutral-600 mb-1 uppercase tracking-wider">Model</div>
+                <select value={model} onChange={e => setModel(e.target.value)}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-2.5 py-1.5 text-xs text-neutral-300 focus:outline-none focus:border-cyan-600">
+                  {providerModels.length > 0
+                    ? providerModels.map(m => <option key={m} value={m}>{m}</option>)
+                    : model ? <option value={model}>{model}</option> : <option value="">Default model</option>
+                  }
+                </select>
+              </div>
+              <button onClick={() => setShowModelPicker(false)}
+                className="text-neutral-700 hover:text-neutral-400 text-base mt-4 flex-shrink-0">✕</button>
+            </div>
+          </div>
+        )}
+
+        {/* Input area */}
         <div className="border-t border-neutral-800 p-3">
           <div className="max-w-2xl mx-auto">
             <div className="flex gap-2 items-end bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2.5 focus-within:border-neutral-500 transition-colors">
               <textarea ref={inputRef} value={input} rows={1}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder={`Message ${agentKey.replace("_", " ")} agent...`}
+                placeholder={`Message ${agentKey.replace("_", " ")} agent…`}
                 className="flex-1 bg-transparent text-sm text-neutral-200 placeholder-neutral-600 resize-none focus:outline-none leading-relaxed"
-                style={{ minHeight: "22px", maxHeight: "160px" }} />
+                style={{ minHeight: "22px", maxHeight: "160px" }}
+                onInput={e => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 160) + "px"; }} />
               {running ? (
                 <button onClick={() => { abortRef.current?.(); setRunning(false); }}
                   className="w-8 h-8 rounded-lg bg-red-500/20 border border-red-500/30 flex items-center justify-center text-red-400 hover:bg-red-500/30 transition-colors flex-shrink-0">
@@ -391,7 +488,22 @@ function ChatPage({ agents }: { agents: AgentInfo[] }) {
                 </button>
               )}
             </div>
-            <p className="text-[10px] text-neutral-700 mt-1.5 text-center">Enter to send · Shift+Enter newline</p>
+            <div className="flex items-center justify-between mt-1.5 px-0.5">
+              <button onClick={() => setShowModelPicker(p => !p)}
+                className={cx("flex items-center gap-1 text-[10px] transition-colors",
+                  showModelPicker ? "text-cyan-500" : "text-neutral-700 hover:text-neutral-500")}>
+                <span>⚙</span>
+                <span className="font-mono">
+                  {model
+                    ? (model.split("/").pop()?.split(":")[0] || model)
+                    : "auto"}
+                </span>
+                {provider && allProviders.find((p: any) => p.id === provider) && (
+                  <span className="text-neutral-800">· {allProviders.find((p: any) => p.id === provider)?.name}</span>
+                )}
+              </button>
+              <p className="text-[10px] text-neutral-800">↵ send · ⇧↵ newline</p>
+            </div>
           </div>
         </div>
       </div>
@@ -416,16 +528,31 @@ function ChatMessage({ msg }: { msg: Message }) {
   }
 
   return (
-    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="flex gap-3">
+    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className="flex gap-3 group">
       <div className={cx("w-8 h-8 rounded-xl bg-gradient-to-br flex items-center justify-center text-white flex-shrink-0 mt-0.5", meta.color)}>
         {meta.icon}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 mb-1.5">
+        <div className="flex items-center gap-2 mb-1.5 flex-wrap">
           <span className="text-xs font-semibold text-neutral-400 capitalize">{msg.agent.replace("_", " ")}</span>
-          <span className="text-[10px] text-neutral-700">{msg.ts.toLocaleTimeString()}</span>
-          {msg.status === "streaming" && <span className="flex items-center gap-1 text-[10px] text-neutral-500"><span className="w-1.5 h-1.5 rounded-full bg-neutral-500 animate-pulse" />generating</span>}
-          {msg.status === "error" && <span className="text-[10px] text-red-500">error</span>}
+          {(msg as any).model && (
+            <span className="text-[10px] font-mono text-cyan-700 bg-cyan-950/40 border border-cyan-900/40 px-1.5 py-0.5 rounded-full">
+              {(msg as any).model.split("/").pop()?.split(":")[0] || (msg as any).model}
+            </span>
+          )}
+          <span className="text-[10px] text-neutral-800">{msg.ts.toLocaleTimeString()}</span>
+          {msg.status === "streaming" && (
+            <span className="flex items-center gap-1 text-[10px] text-neutral-500">
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 animate-pulse" />streaming
+            </span>
+          )}
+          {msg.status === "error" && <span className="text-[10px] text-red-500">⚠ error</span>}
+          {msg.status === "done" && msg.content && (
+            <button onClick={() => navigator.clipboard.writeText(msg.content)}
+              className="ml-auto opacity-0 group-hover:opacity-100 text-[10px] text-neutral-700 hover:text-neutral-400 transition-all">
+              copy
+            </button>
+          )}
         </div>
         {(toolCalls.length > 0 || thoughts.length > 0) && (
           <div className="mb-2">
@@ -1615,7 +1742,7 @@ function WizardLaunch({ onDone, onBack }: { onDone: () => void; onBack: () => vo
   const runTests = async () => {
     setTesting(true);
     try {
-      const r = await apiFetch("/cloud/providers/check");
+      const r = await apiFetch("/cloud/providers/check", { method: "POST" });
       setResults(r);
     } catch { }
     setTesting(false);

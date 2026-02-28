@@ -353,7 +353,7 @@ async def _run_agent_stream(model: str, task: str, agent_key: str, session_id: s
     system_prompt = SYSTEM_PROMPTS.get(agent_key, SYSTEM_PROMPTS["assistant"])
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=task)]
 
-    yield f"data: {json.dumps({'event_type': 'started', 'content': f'Running {agent_key} agent...', 'agent_id': agent_key, 'agent_name': agent_key, 'session_id': session_id})}\n\n"
+    yield f"data: {json.dumps({'event_type': 'started', 'content': f'Running {agent_key} agent...', 'agent_id': agent_key, 'agent_name': agent_key, 'session_id': session_id, 'model_used': model})}\n\n"
 
     try:
         llm = _build_llm(model, temperature=0.7)
@@ -364,8 +364,8 @@ async def _run_agent_stream(model: str, task: str, agent_key: str, session_id: s
                 full_content += token
                 yield f"data: {json.dumps({'event_type': 'stream_token', 'content': token, 'agent_id': agent_key, 'agent_name': agent_key, 'session_id': session_id})}\n\n"
 
-        yield f"data: {json.dumps({'event_type': 'output', 'content': full_content, 'agent_id': agent_key, 'agent_name': agent_key, 'session_id': session_id})}\n\n"
-        yield f"data: {json.dumps({'event_type': 'complete', 'content': full_content, 'agent_id': agent_key, 'agent_name': agent_key, 'session_id': session_id})}\n\n"
+        yield f"data: {json.dumps({'event_type': 'output', 'content': full_content, 'agent_id': agent_key, 'agent_name': agent_key, 'session_id': session_id, 'model_used': model})}\n\n"
+        yield f"data: {json.dumps({'event_type': 'complete', 'content': full_content, 'agent_id': agent_key, 'agent_name': agent_key, 'session_id': session_id, 'model_used': model})}\n\n"
 
     except Exception as e:
         err = str(e)
@@ -465,8 +465,18 @@ async def run_agent(req: RunAgentReq):
         elif ollama_list:
             model = ollama_list[0]["name"]
         else:
-            # No model available at all
-            err_msg = "No models available. Install Ollama and pull a model, or add a cloud API key (.env)."
+            # Try cloud providers via openclaw's detect_provider
+            try:
+                import sys as _s; _s.path.insert(0, str(HERE / "openclaw"))
+                from openclaw.core import detect_provider, detect_model as _dm, _get_provider_config
+                _prov = detect_provider()
+                _cfg = _get_provider_config(_prov)
+                if _cfg.get("resolved_api_key") and _prov != "ollama":
+                    model = _dm(_prov)
+                else:
+                    raise ValueError("no cloud key")
+            except Exception:
+                err_msg = "No models available. Install Ollama and pull a model, or add a cloud API key in Settings."
             if not req.stream:
                 raise HTTPException(503, err_msg)
             async def no_model():
@@ -776,6 +786,47 @@ async def search_kb(query: str = Query(...), collection: str = Query("research")
 async def kb_collections():
     cols = list(set(d.get("collection","research") for d in _kb)) or ["research"]
     return [{"name": c} for c in cols]
+
+@app.get("/knowledge/stats")
+async def knowledge_stats():
+    online = await ollama_available()
+    collections = list(set(d.get("collection","research") for d in _kb)) or ["research"]
+    return {
+        "total_documents": len(_kb),
+        "collections": collections,
+        "vector_store": "in-memory (qdrant optional)",
+        "status": "ready" if online else "degraded (Ollama offline)",
+    }
+
+# ── Conversation history (in-memory; swap for SQLite in production) ────────────
+_conversations: list = []
+
+class ConversationEntry(BaseModel):
+    session_id: str; agent_key: str; task: str
+    response: str = ""; model: str = ""; ts: str = ""
+
+@app.get("/conversations")
+async def list_conversations(limit: int = Query(50, ge=1, le=500),
+                              agent_key: Optional[str] = Query(None)):
+    convs = _conversations[-limit:]
+    if agent_key:
+        convs = [c for c in convs if c.get("agent_key") == agent_key]
+    return list(reversed(convs))
+
+@app.post("/conversations")
+async def save_conversation(entry: ConversationEntry):
+    import datetime
+    record = entry.dict()
+    record["ts"] = record.get("ts") or datetime.datetime.utcnow().isoformat()
+    _conversations.append(record)
+    if len(_conversations) > 1000:
+        _conversations.pop(0)
+    return {"saved": True, "id": len(_conversations) - 1}
+
+@app.delete("/conversations")
+async def clear_conversations():
+    _conversations.clear()
+    return {"cleared": True}
 
 # ── Stats ──────────────────────────────────────────────────────────────────────
 @app.get("/stats")
