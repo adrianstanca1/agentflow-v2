@@ -13,6 +13,8 @@ import {
   Sparkles, ArrowRight, MessageSquare, Shield,
   FileText, Boxes, Plug, Brain, Wrench, Gauge, Info, Radio, CircleDot,
   Wifi, WifiOff, SortDesc, Filter, Star, Clock, Hash, Tag, ChevronUp,
+  LayoutDashboard,
+  Network,
 } from "lucide-react";
 
 // Config
@@ -218,6 +220,1026 @@ function NavSidebar({ page, setPage, stats }: { page: Page; setPage: (p: Page) =
     </div>
   );
 }
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DASHBOARD PAGE — System overview with live metrics
+// ══════════════════════════════════════════════════════════════════════════════
+function DashboardPage({ stats, agents, setPage }: { stats: any; agents: AgentInfo[]; setPage: (p: Page) => void }) {
+  const [health, setHealth] = useState<any>(null);
+  const [providers, setProviders] = useState<any[]>([]);
+  const [conversations, setConversations] = useState<any[]>([]);
+  const [checking, setChecking] = useState(false);
+  const [providerHealth, setProviderHealth] = useState<Record<string, any>>({});
+
+  const load = async () => {
+    try {
+      const [h, p, c] = await Promise.all([
+        apiFetch("/health"),
+        apiFetch("/settings/keys"),
+        apiFetch("/conversations?limit=5"),
+      ]);
+      setHealth(h);
+      setProviders(Object.entries(p).map(([id, v]: [string, any]) => ({ id, ...v })));
+      setConversations(c);
+    } catch {}
+  };
+
+  const checkProviders = async () => {
+    setChecking(true);
+    try {
+      const r = await apiFetch("/cloud/providers/check", { method: "POST" });
+      setProviderHealth(r);
+    } catch {}
+    setChecking(false);
+  };
+
+  useEffect(() => { load(); checkProviders(); }, []);
+  useEffect(() => { const iv = setInterval(load, 15000); return () => clearInterval(iv); }, []);
+
+  const configuredProviders = providers.filter(p => p.configured);
+  const mode = stats?.mode || health?.mode || "demo";
+  const ollamaOk = stats?.ollama?.healthy_hosts > 0;
+
+  const modeColor = mode === "hybrid" ? "text-cyan-400" : mode === "local" ? "text-green-400" : "text-amber-400";
+  const modeDesc = mode === "hybrid" ? "Local + Cloud" : mode === "local" ? "Ollama only" : "No providers — add keys";
+
+  return (
+    <div className="flex-1 overflow-y-auto bg-[#080809]">
+      <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
+
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-bold text-white tracking-tight">Dashboard</h1>
+            <p className={cx("text-sm mt-0.5 font-medium", modeColor)}>{modeDesc}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className={cx("px-3 py-1.5 rounded-full text-xs font-mono border",
+              mode === "demo" ? "bg-amber-500/10 border-amber-500/20 text-amber-400" :
+              mode === "hybrid" ? "bg-cyan-500/10 border-cyan-500/20 text-cyan-400" :
+              "bg-green-500/10 border-green-500/20 text-green-400")}>
+              {mode.toUpperCase()}
+            </div>
+          </div>
+        </div>
+
+        {/* System status grid */}
+        <div className="grid grid-cols-4 gap-3">
+          {[
+            {
+              label: "Ollama", value: ollamaOk ? `${stats?.ollama?.total_models || 0} models` : "Offline",
+              sub: ollamaOk ? `${stats?.ollama?.healthy_hosts} host${stats?.ollama?.healthy_hosts > 1 ? "s" : ""}` : "Not running",
+              icon: "🦙", ok: ollamaOk, action: () => setPage("models"),
+            },
+            {
+              label: "Agents", value: `${agents.length} active`,
+              sub: agents.map(a => (AGENT_META[a.id] || AGENT_META.assistant).icon).join(" ") || "—",
+              icon: "🤖", ok: agents.length > 0, action: () => setPage("agents"),
+            },
+            {
+              label: "Cloud", value: `${configuredProviders.length} providers`,
+              sub: configuredProviders.length > 0 ? configuredProviders.map(p => p.icon).join(" ") : "No keys",
+              icon: "☁️", ok: configuredProviders.length > 0, action: () => setPage("settings"),
+            },
+            {
+              label: "Conversations", value: `${conversations.length} recent`,
+              sub: conversations[0] ? conversations[0].agent_key + " · " + new Date(conversations[0].ts).toLocaleTimeString() : "No history",
+              icon: "💬", ok: conversations.length > 0, action: () => setPage("chat"),
+            },
+          ].map(item => (
+            <button key={item.label} onClick={item.action}
+              className={cx("rounded-2xl border p-4 text-left transition-all hover:border-white/15 group",
+                item.ok ? "bg-white/[0.03] border-white/8" : "bg-white/[0.01] border-white/5")}>
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xl">{item.icon}</span>
+                <div className={cx("w-2 h-2 rounded-full transition-colors",
+                  item.ok ? "bg-green-400" : "bg-neutral-700")} />
+              </div>
+              <div className={cx("text-base font-bold tracking-tight mb-0.5",
+                item.ok ? "text-white" : "text-neutral-600")}>{item.value}</div>
+              <div className="text-[10px] text-neutral-600">{item.label}</div>
+              <div className="text-[10px] text-neutral-700 mt-1 truncate">{item.sub}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* Provider health */}
+        <div className="rounded-2xl border border-white/8 bg-white/[0.02] p-5">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-sm font-semibold text-white">Provider Health</h2>
+            <button onClick={checkProviders} disabled={checking}
+              className="flex items-center gap-1.5 text-xs text-neutral-600 hover:text-neutral-400 transition-colors disabled:opacity-50">
+              {checking ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+              Refresh
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {/* Ollama */}
+            <div className={cx("rounded-xl border p-3",
+              ollamaOk ? "bg-green-500/5 border-green-500/15" : "bg-white/[0.02] border-white/5")}>
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-base">🦙</span>
+                <span className="text-xs font-medium text-white">Ollama</span>
+                <div className={cx("w-1.5 h-1.5 rounded-full ml-auto",
+                  ollamaOk ? "bg-green-400 animate-pulse" : "bg-neutral-700")} />
+              </div>
+              <div className={cx("text-[11px]", ollamaOk ? "text-green-400" : "text-neutral-600")}>
+                {ollamaOk ? `✓ ${stats?.ollama?.total_models} models` : "Offline"}
+              </div>
+            </div>
+            {/* Cloud providers */}
+            {providers.filter(p => p.configured).map(p => {
+              const ph = providerHealth[p.id];
+              return (
+                <div key={p.id} className={cx("rounded-xl border p-3",
+                  ph?.healthy ? "bg-green-500/5 border-green-500/15" :
+                  ph?.healthy === false ? "bg-red-500/5 border-red-500/15" :
+                  "bg-white/[0.02] border-white/5")}>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-base">{p.icon}</span>
+                    <span className="text-xs font-medium text-white">{p.name}</span>
+                    <div className={cx("w-1.5 h-1.5 rounded-full ml-auto",
+                      ph?.healthy ? "bg-green-400" : ph?.healthy === false ? "bg-red-400" : "bg-neutral-700")} />
+                  </div>
+                  <div className={cx("text-[11px]",
+                    ph?.healthy ? "text-green-400" : ph?.healthy === false ? "text-red-400" : "text-neutral-600")}>
+                    {checking ? "Checking…" : ph?.healthy ? `✓ ${ph.latency_ms}ms` : ph?.healthy === false ? "✗ key error" : "Not tested"}
+                  </div>
+                </div>
+              );
+            })}
+            {/* Empty state */}
+            {configuredProviders.length === 0 && !ollamaOk && (
+              <div className="col-span-2 rounded-xl border border-dashed border-white/10 p-4 text-center">
+                <p className="text-xs text-neutral-600">No providers connected</p>
+                <button onClick={() => setPage("settings")} className="text-xs text-cyan-700 hover:text-cyan-500 mt-1 transition-colors">
+                  Add in Settings →
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Agents + recent activity */}
+        <div className="grid grid-cols-2 gap-4">
+          {/* Agents */}
+          <div className="rounded-2xl border border-white/8 bg-white/[0.02] p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-white">Agents</h2>
+              <button onClick={() => setPage("agents")} className="text-[10px] text-neutral-600 hover:text-neutral-400 transition-colors">manage →</button>
+            </div>
+            <div className="space-y-2">
+              {agents.slice(0, 6).map(a => {
+                const m = AGENT_META[a.id] || AGENT_META.assistant;
+                return (
+                  <button key={a.id} onClick={() => setPage("chat")}
+                    className="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors text-left">
+                    <div className={cx("w-7 h-7 rounded-lg bg-gradient-to-br flex items-center justify-center text-white text-xs flex-shrink-0", m.color)}>
+                      {m.icon}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-medium text-neutral-300 capitalize">{a.name}</div>
+                      <div className="text-[10px] text-neutral-700 font-mono truncate">{a.model || "auto"}</div>
+                    </div>
+                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 flex-shrink-0" />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Recent conversations */}
+          <div className="rounded-2xl border border-white/8 bg-white/[0.02] p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-white">Recent</h2>
+              <button onClick={() => setPage("chat")} className="text-[10px] text-neutral-600 hover:text-neutral-400 transition-colors">chat →</button>
+            </div>
+            {conversations.length > 0 ? (
+              <div className="space-y-2">
+                {conversations.slice(0, 5).map((c, i) => {
+                  const m = AGENT_META[c.agent_key] || AGENT_META.assistant;
+                  return (
+                    <button key={i} onClick={() => setPage("chat")}
+                      className="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors text-left">
+                      <span className="text-base flex-shrink-0">{m.icon}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs text-neutral-400 truncate">{c.task.slice(0, 50)}</div>
+                        <div className="text-[10px] text-neutral-700">{c.agent_key} · {c.model}</div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-24 text-center">
+                <p className="text-xs text-neutral-700">No conversations yet</p>
+                <button onClick={() => setPage("chat")} className="text-xs text-cyan-700 hover:text-cyan-500 mt-1 transition-colors">Start chatting →</button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Quick actions */}
+        <div className="grid grid-cols-4 gap-3">
+          {[
+            { label: "Chat", icon: "💬", page: "chat" as Page, desc: "Talk to any agent" },
+            { label: "Models", icon: "🧠", page: "models" as Page, desc: "Browse & pull models" },
+            { label: "Knowledge", icon: "📚", page: "knowledge" as Page, desc: "Search documents" },
+            { label: "OpenClaw", icon: "🦅", page: "openclaw" as Page, desc: "Agentic coding" },
+          ].map(item => (
+            <button key={item.label} onClick={() => setPage(item.page)}
+              className="rounded-2xl border border-white/8 bg-white/[0.02] p-4 text-left hover:border-white/15 hover:bg-white/[0.04] transition-all group">
+              <span className="text-2xl block mb-2">{item.icon}</span>
+              <div className="text-sm font-semibold text-white">{item.label}</div>
+              <div className="text-[10px] text-neutral-600 mt-0.5">{item.desc}</div>
+            </button>
+          ))}
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AGENTS PAGE — Full agent management with config editor
+// ══════════════════════════════════════════════════════════════════════════════
+const DEFAULT_PROMPTS: Record<string, string> = {
+  assistant:    "You are a highly capable AI assistant. Be concise, accurate, and genuinely helpful. Think step by step.",
+  coding:       "You are an expert software engineer. Write clean, tested, production-quality code. Think step by step before coding. Explain your approach.",
+  research:     "You are a world-class research analyst. Synthesize information from multiple sources. Always cite your reasoning. Be thorough and accurate.",
+  data_analyst: "You are an expert data analyst. Turn raw data into actionable insights. Recommend clear visualizations. Quantify impact where possible.",
+  devops:       "You are a senior DevOps/SRE engineer. Design production infrastructure following best practices. Always consider security, scalability, and observability.",
+  writer:       "You are a versatile, talented writer. Create compelling, well-structured content tailored to the audience. Match the requested tone precisely.",
+  sql:          "You are an expert SQL and database engineer. Write optimized, well-explained queries. Always consider indexes and query plans.",
+  qa:           "You are a senior QA engineer. Write comprehensive tests covering happy paths, edge cases, and error conditions. Prioritize catching real bugs.",
+};
+
+function AgentsPage({ agents, setPage }: { agents: AgentInfo[]; setPage: (p: Page) => void }) {
+  const [selected, setSelected] = useState<string>(agents[0]?.id || "assistant");
+  const [systemPrompt, setSystemPrompt] = useState<Record<string, string>>({});
+  const [modelOverride, setModelOverride] = useState<Record<string, string>>({});
+  const [testInput, setTestInput] = useState("");
+  const [testOutput, setTestOutput] = useState("");
+  const [testRunning, setTestRunning] = useState(false);
+  const [dirty, setDirty] = useState<Record<string, boolean>>({});
+  const [saved, setSaved] = useState<Record<string, boolean>>({});
+
+  const agentList = agents.length > 0 ? agents :
+    Object.keys(AGENT_META).map(k => ({
+      id: k, name: k, description: (AGENT_META as any)[k]?.description || "",
+      type: k, model: "", prefer_local: false, tools: [],
+    } as AgentInfo));
+
+  const sel = agentList.find(a => a.id === selected) || agentList[0];
+  const meta = sel ? (AGENT_META[sel.id] || AGENT_META.assistant) : AGENT_META.assistant;
+
+  const getPrompt = (id: string) =>
+    systemPrompt[id] ?? DEFAULT_PROMPTS[id] ?? DEFAULT_PROMPTS.assistant;
+
+  const handlePromptChange = (id: string, val: string) => {
+    setSystemPrompt(p => ({ ...p, [id]: val }));
+    setDirty(d => ({ ...d, [id]: true }));
+    setSaved(s => ({ ...s, [id]: false }));
+  };
+
+  const savePrompt = async (id: string) => {
+    // Store in localStorage (server-side persistence is future work)
+    localStorage.setItem(`agent_prompt_${id}`, systemPrompt[id] || "");
+    setDirty(d => ({ ...d, [id]: false }));
+    setSaved(s => ({ ...s, [id]: true }));
+    setTimeout(() => setSaved(s => ({ ...s, [id]: false })), 2000);
+    toast.success("System prompt saved");
+  };
+
+  const resetPrompt = (id: string) => {
+    setSystemPrompt(p => ({ ...p, [id]: DEFAULT_PROMPTS[id] || "" }));
+    setDirty(d => ({ ...d, [id]: true }));
+  };
+
+  const testAgent = async () => {
+    if (!testInput.trim() || !sel) return;
+    setTestRunning(true);
+    setTestOutput("");
+    try {
+      const res = await fetch(`${API}/agents/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          agent_key: sel.id,
+          task: testInput,
+          stream: true,
+          model_override: modelOverride[sel.id] || undefined,
+        }),
+      });
+      const reader = res.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n"); buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const evt = JSON.parse(line.slice(6));
+            if (evt.event_type === "stream_token") setTestOutput(p => p + evt.content);
+            if (evt.event_type === "complete") setTestOutput(evt.content);
+          } catch {}
+        }
+      }
+    } catch (e: any) {
+      setTestOutput(`Error: ${e.message}`);
+    }
+    setTestRunning(false);
+  };
+
+  // Load saved prompts from localStorage on mount
+  useEffect(() => {
+    const loaded: Record<string, string> = {};
+    agentList.forEach(a => {
+      const saved = localStorage.getItem(`agent_prompt_${a.id}`);
+      if (saved) loaded[a.id] = saved;
+    });
+    if (Object.keys(loaded).length > 0) setSystemPrompt(loaded);
+  }, []);
+
+  return (
+    <div className="flex h-full bg-[#080809]">
+      {/* Agent list sidebar */}
+      <div className="w-56 flex-shrink-0 border-r border-white/8 flex flex-col">
+        <div className="p-4 border-b border-white/8">
+          <h2 className="text-sm font-bold text-white">Agents</h2>
+          <p className="text-[10px] text-neutral-600 mt-0.5">{agentList.length} configured</p>
+        </div>
+        <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+          {agentList.map(a => {
+            const m = AGENT_META[a.id] || AGENT_META.assistant;
+            const isDirty = dirty[a.id];
+            return (
+              <button key={a.id} onClick={() => setSelected(a.id)}
+                className={cx("w-full text-left p-2.5 rounded-xl transition-all flex items-center gap-2.5 group",
+                  selected === a.id ? "bg-white/8 border border-white/12" : "hover:bg-white/4 border border-transparent")}>
+                <div className={cx("w-8 h-8 rounded-xl bg-gradient-to-br flex items-center justify-center text-white flex-shrink-0", m.color)}>
+                  {m.icon}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium text-neutral-200 capitalize flex items-center gap-1">
+                    {a.name}
+                    {isDirty && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" title="Unsaved changes" />}
+                  </div>
+                  <div className="text-[10px] text-neutral-600 font-mono truncate">
+                    {modelOverride[a.id] || a.model || "auto"}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        <div className="p-3 border-t border-white/8">
+          <button onClick={() => setPage("chat")}
+            className="w-full py-2 bg-white/8 hover:bg-white/12 text-white text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5">
+            <MessageSquare className="w-3.5 h-3.5" /> Open in Chat
+          </button>
+        </div>
+      </div>
+
+      {/* Main config panel */}
+      {sel && (
+        <div className="flex-1 overflow-y-auto">
+          <div className="max-w-2xl mx-auto px-6 py-6 space-y-5">
+            {/* Header */}
+            <div className="flex items-center gap-4">
+              <div className={cx("w-14 h-14 rounded-2xl bg-gradient-to-br flex items-center justify-center text-2xl flex-shrink-0", meta.color)}>
+                {meta.icon}
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-white capitalize">{sel.name}</h2>
+                <p className="text-sm text-neutral-500">{sel.description || (meta as any).label || sel.id}</p>
+              </div>
+              <button onClick={() => { setTestOutput(""); setTestInput(""); }}
+                className="ml-auto text-xs text-neutral-700 hover:text-neutral-500 transition-colors">
+                Clear test
+              </button>
+            </div>
+
+            {/* Stats row */}
+            <div className="grid grid-cols-3 gap-3">
+              {[
+                { label: "Status", value: "Active", ok: true },
+                { label: "Tools", value: `${(sel.tools || []).length} tools`, ok: (sel.tools || []).length > 0 },
+                { label: "Prefer local", value: sel.prefer_local ? "Yes" : "No", ok: sel.prefer_local },
+              ].map(item => (
+                <div key={item.label} className="bg-white/[0.03] border border-white/8 rounded-xl p-3">
+                  <div className="text-[10px] text-neutral-600 mb-1">{item.label}</div>
+                  <div className={cx("text-sm font-semibold", item.ok ? "text-white" : "text-neutral-500")}>{item.value}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Model override */}
+            <div className="bg-white/[0.02] border border-white/8 rounded-2xl p-5">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Model Override</h3>
+                  <p className="text-[11px] text-neutral-600 mt-0.5">Override the model for this agent specifically</p>
+                </div>
+              </div>
+              <ModelPicker
+                value={modelOverride[sel.id] || sel.model || ""}
+                onChange={v => setModelOverride(prev => ({ ...prev, [sel.id]: v }))}
+              />
+            </div>
+
+            {/* System prompt editor */}
+            <div className="bg-white/[0.02] border border-white/8 rounded-2xl p-5">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">System Prompt</h3>
+                  <p className="text-[11px] text-neutral-600 mt-0.5">
+                    Controls how this agent thinks and responds
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => resetPrompt(sel.id)}
+                    className="text-[11px] text-neutral-700 hover:text-neutral-400 transition-colors px-2 py-1">
+                    Reset
+                  </button>
+                  <button onClick={() => savePrompt(sel.id)}
+                    disabled={!dirty[sel.id]}
+                    className={cx("text-[11px] px-3 py-1 rounded-lg transition-colors",
+                      saved[sel.id] ? "text-green-400 bg-green-500/10 border border-green-500/20" :
+                      dirty[sel.id] ? "text-white bg-cyan-600 hover:bg-cyan-500" :
+                      "text-neutral-700 bg-white/5 cursor-not-allowed")}>
+                    {saved[sel.id] ? "✓ Saved" : "Save"}
+                  </button>
+                </div>
+              </div>
+              <textarea
+                value={getPrompt(sel.id)}
+                onChange={e => handlePromptChange(sel.id, e.target.value)}
+                rows={6}
+                className="w-full bg-neutral-950 border border-white/8 rounded-xl px-4 py-3 text-sm text-neutral-300 font-mono leading-relaxed resize-none focus:outline-none focus:border-cyan-600/50 placeholder-neutral-700"
+                placeholder="Enter system prompt…"
+              />
+              <div className="mt-2 flex items-center justify-between text-[10px] text-neutral-700">
+                <span>{getPrompt(sel.id).length} chars</span>
+                <span>{dirty[sel.id] ? "● Unsaved changes" : "Saved"}</span>
+              </div>
+            </div>
+
+            {/* Live test panel */}
+            <div className="bg-white/[0.02] border border-white/8 rounded-2xl p-5">
+              <h3 className="text-sm font-semibold text-white mb-3">Test Agent</h3>
+              <div className="flex gap-2 mb-3">
+                <textarea
+                  value={testInput}
+                  onChange={e => setTestInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) testAgent(); }}
+                  placeholder={`Send a message to ${sel.name}… (Cmd+Enter to run)`}
+                  rows={2}
+                  className="flex-1 bg-neutral-950 border border-white/8 rounded-xl px-4 py-3 text-sm text-neutral-300 resize-none focus:outline-none focus:border-cyan-600/50 placeholder-neutral-700"
+                />
+                <button onClick={testAgent} disabled={testRunning || !testInput.trim()}
+                  className={cx("px-4 py-2 rounded-xl text-sm font-semibold transition-colors flex-shrink-0",
+                    meta.color, "bg-gradient-to-br text-white disabled:opacity-40")}>
+                  {testRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                </button>
+              </div>
+              {testOutput && (
+                <div className="bg-neutral-950 border border-white/8 rounded-xl p-4 text-sm text-neutral-300 leading-relaxed">
+                  <ReactMarkdown components={{
+                    code({ inline, className, children, ...props }: any) {
+                      const lang = /language-(\w+)/.exec(className || "")?.[1];
+                      return !inline && lang ? (
+                        <SyntaxHighlighter style={atomDark} language={lang} PreTag="div"
+                          className="!rounded-xl !text-xs !my-2">
+                          {String(children).replace(/\n$/, "")}
+                        </SyntaxHighlighter>
+                      ) : <code className="bg-neutral-800 text-cyan-300 rounded px-1 text-xs font-mono" {...props}>{children}</code>;
+                    },
+                    p: ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
+                  }}>
+                    {testOutput}
+                  </ReactMarkdown>
+                  {testRunning && <span className="inline-block w-2 h-4 bg-cyan-400 animate-pulse ml-1" />}
+                </div>
+              )}
+              {!testOutput && !testRunning && (
+                <div className="text-center py-6 text-neutral-700 text-xs">
+                  Run a test to see how this agent responds
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// KNOWLEDGE PAGE — Document browser + search + upload
+// ══════════════════════════════════════════════════════════════════════════════
+function KnowledgePage() {
+  const [query, setQuery] = useState("");
+  const [collection, setCollection] = useState("research");
+  const [results, setResults] = useState<any[]>([]);
+  const [ingestText, setIngestText] = useState("");
+  const [ingestUrl, setIngestUrl] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [ingesting, setIngesting] = useState(false);
+  const [stats, setStats] = useState<any>(null);
+  const [tab, setTab] = useState<"search" | "ingest">("search");
+
+  const load = async () => {
+    try {
+      const s = await apiFetch("/knowledge/stats");
+      setStats(s);
+    } catch {}
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const search = async () => {
+    if (!query.trim()) return;
+    setSearching(true);
+    try {
+      const r = await apiFetch(`/knowledge/search?query=${encodeURIComponent(query)}&collection=${collection}&limit=10`);
+      setResults(Array.isArray(r) ? r : []);
+    } catch (e: any) { toast.error(e.message); }
+    finally { setSearching(false); }
+  };
+
+  const ingestText_ = async () => {
+    if (!ingestText.trim()) return;
+    setIngesting(true);
+    try {
+      await apiFetch("/knowledge/ingest", {
+        method: "POST",
+        body: JSON.stringify({ content: ingestText, collection }),
+      });
+      toast.success("Added to knowledge base");
+      setIngestText("");
+      load();
+    } catch (e: any) { toast.error(e.message); }
+    finally { setIngesting(false); }
+  };
+
+  const ingestUrl_ = async () => {
+    if (!ingestUrl.trim()) return;
+    setIngesting(true);
+    try {
+      await apiFetch("/knowledge/ingest", {
+        method: "POST",
+        body: JSON.stringify({ url: ingestUrl, collection, type: "url" }),
+      });
+      toast.success("URL fetched and indexed");
+      setIngestUrl("");
+      load();
+    } catch (e: any) { toast.error(`URL fetch failed: ${e.message}`); }
+    finally { setIngesting(false); }
+  };
+
+  const COLLECTIONS = ["research", "coding", "docs", "general"];
+
+  return (
+    <div className="flex-1 overflow-y-auto bg-[#080809]">
+      <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
+
+        {/* Header */}
+        <div className="flex items-start justify-between">
+          <div>
+            <h1 className="text-xl font-bold text-white">Knowledge Base</h1>
+            <p className="text-sm text-neutral-500 mt-0.5">Semantic search · Qdrant + Ollama embeddings</p>
+          </div>
+          {stats && (
+            <div className="flex gap-3">
+              {[
+                { label: "Documents", value: stats.total_documents },
+                { label: "Collections", value: stats.collections?.length || 0 },
+              ].map(item => (
+                <div key={item.label} className="bg-white/[0.03] border border-white/8 rounded-xl px-4 py-2 text-right">
+                  <div className="text-base font-bold text-white">{item.value}</div>
+                  <div className="text-[10px] text-neutral-600">{item.label}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Status bar */}
+        {stats && (
+          <div className={cx("flex items-center gap-3 rounded-xl border px-4 py-2.5 text-xs",
+            stats.status === "ready" ? "bg-green-500/5 border-green-500/20 text-green-400" :
+            "bg-amber-500/5 border-amber-500/20 text-amber-400")}>
+            <div className={cx("w-1.5 h-1.5 rounded-full", stats.status === "ready" ? "bg-green-400 animate-pulse" : "bg-amber-400")} />
+            <span>{stats.vector_store}</span>
+            <span className="text-neutral-700">·</span>
+            <span>{stats.status}</span>
+            {stats.status !== "ready" && (
+              <span className="text-neutral-600 ml-auto">Ollama must be running for embeddings</span>
+            )}
+          </div>
+        )}
+
+        {/* Collection tabs */}
+        <div className="flex gap-1 bg-white/[0.03] border border-white/8 rounded-xl p-1">
+          {COLLECTIONS.map(c => (
+            <button key={c} onClick={() => setCollection(c)}
+              className={cx("flex-1 py-1.5 rounded-lg text-xs font-medium transition-colors capitalize",
+                collection === c ? "bg-white/10 text-white" : "text-neutral-600 hover:text-neutral-400")}>
+              {c}
+            </button>
+          ))}
+        </div>
+
+        {/* Search / Ingest tabs */}
+        <div className="flex gap-2 border-b border-white/8 pb-0">
+          {(["search", "ingest"] as const).map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              className={cx("pb-3 px-1 text-sm font-medium capitalize border-b-2 transition-colors",
+                tab === t ? "border-cyan-500 text-white" : "border-transparent text-neutral-600 hover:text-neutral-400")}>
+              {t}
+            </button>
+          ))}
+        </div>
+
+        {tab === "search" && (
+          <div className="space-y-4">
+            <div className="flex gap-2">
+              <input value={query} onChange={e => setQuery(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && search()}
+                placeholder="Search the knowledge base semantically…"
+                className="flex-1 bg-white/[0.03] border border-white/8 rounded-xl px-4 py-3 text-sm text-white placeholder-neutral-700 focus:outline-none focus:border-cyan-600/50" />
+              <button onClick={search} disabled={searching || !query.trim()}
+                className="px-5 py-3 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-sm font-semibold rounded-xl transition-colors flex items-center gap-2">
+                {searching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                Search
+              </button>
+            </div>
+
+            {results.length > 0 && (
+              <div className="space-y-3">
+                <p className="text-xs text-neutral-600">{results.length} results in <span className="text-neutral-400">{collection}</span></p>
+                {results.map((r, i) => (
+                  <div key={i} className="bg-white/[0.02] border border-white/8 rounded-2xl p-4">
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className={cx("text-xs font-bold font-mono px-2 py-0.5 rounded-full",
+                        r.score > 0.8 ? "bg-green-500/15 text-green-400" :
+                        r.score > 0.6 ? "bg-cyan-500/15 text-cyan-400" :
+                        "bg-white/8 text-neutral-500")}>
+                        {(r.score * 100).toFixed(0)}%
+                      </div>
+                      {r.payload?.source && (
+                        <span className="text-[10px] text-neutral-600 font-mono">{r.payload.source}</span>
+                      )}
+                      {r.payload?.collection && (
+                        <span className="text-[10px] text-neutral-700 ml-auto">{r.payload.collection}</span>
+                      )}
+                    </div>
+                    <p className="text-sm text-neutral-400 leading-relaxed">
+                      {r.payload?.content?.slice(0, 300)}
+                      {r.payload?.content?.length > 300 ? "…" : ""}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!searching && results.length === 0 && query && (
+              <div className="text-center py-10 text-neutral-600">
+                <p className="text-sm">No results found for "{query}"</p>
+                <p className="text-xs mt-1">Try ingesting some documents first</p>
+              </div>
+            )}
+
+            {!query && (
+              <div className="text-center py-10 text-neutral-700 text-xs">
+                Enter a query to search the {collection} collection
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "ingest" && (
+          <div className="space-y-4">
+            {/* Paste text */}
+            <div className="bg-white/[0.02] border border-white/8 rounded-2xl p-5">
+              <h3 className="text-sm font-semibold text-white mb-1">Paste Text</h3>
+              <p className="text-xs text-neutral-600 mb-3">Add any text — docs, notes, research, code — to the knowledge base</p>
+              <textarea
+                value={ingestText}
+                onChange={e => setIngestText(e.target.value)}
+                placeholder="Paste text to index…"
+                rows={5}
+                className="w-full bg-neutral-950 border border-white/8 rounded-xl px-4 py-3 text-sm text-neutral-300 resize-none focus:outline-none focus:border-cyan-600/50 placeholder-neutral-700"
+              />
+              <div className="flex items-center justify-between mt-3">
+                <span className="text-[10px] text-neutral-700">{ingestText.length} chars · collection: {collection}</span>
+                <button onClick={ingestText_} disabled={ingesting || !ingestText.trim()}
+                  className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-xs font-semibold rounded-xl transition-colors flex items-center gap-2">
+                  {ingesting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                  Add to {collection}
+                </button>
+              </div>
+            </div>
+
+            {/* URL fetch */}
+            <div className="bg-white/[0.02] border border-white/8 rounded-2xl p-5">
+              <h3 className="text-sm font-semibold text-white mb-1">Fetch URL</h3>
+              <p className="text-xs text-neutral-600 mb-3">Fetch a webpage and index its content</p>
+              <div className="flex gap-2">
+                <input value={ingestUrl} onChange={e => setIngestUrl(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && ingestUrl_()}
+                  placeholder="https://example.com/article"
+                  className="flex-1 bg-neutral-950 border border-white/8 rounded-xl px-4 py-2.5 text-sm text-neutral-300 focus:outline-none focus:border-cyan-600/50 placeholder-neutral-700 font-mono" />
+                <button onClick={ingestUrl_} disabled={ingesting || !ingestUrl.trim()}
+                  className="px-4 py-2.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-xs font-semibold rounded-xl transition-colors">
+                  {ingesting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Fetch"}
+                </button>
+              </div>
+            </div>
+
+            {/* Tips */}
+            <div className="bg-white/[0.01] border border-white/5 rounded-2xl p-5">
+              <h3 className="text-xs font-semibold text-neutral-500 mb-3 uppercase tracking-wider">Tips</h3>
+              <div className="space-y-2 text-xs text-neutral-600">
+                <p>• Use <span className="text-neutral-400">research</span> for papers, articles, web content</p>
+                <p>• Use <span className="text-neutral-400">coding</span> for code snippets, docs, examples</p>
+                <p>• Use <span className="text-neutral-400">docs</span> for your own documentation</p>
+                <p>• Ollama must be running with an embedding model for indexing to work</p>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MCP PAGE — Model Context Protocol server management
+// ══════════════════════════════════════════════════════════════════════════════
+function MCPPage() {
+  const [servers, setServers] = useState<any[]>([]);
+  const [popular, setPopular] = useState<any[]>([]);
+  const [tools, setTools] = useState<any[]>([]);
+  const [tab, setTab] = useState<"active" | "discover">("active");
+  const [showAdd, setShowAdd] = useState(false);
+  const [newSrv, setNewSrv] = useState({ name: "", command: "", args: "", url: "", transport: "stdio" as "stdio" | "http" });
+
+  const load = async () => {
+    try {
+      const [s, p, t] = await Promise.all([
+        apiFetch("/mcp/servers"),
+        apiFetch("/mcp/servers/popular"),
+        apiFetch("/mcp/tools"),
+      ]);
+      setServers(s); setPopular(p); setTools(t);
+    } catch {}
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const addServer = async (srv: any) => {
+    try {
+      await apiFetch("/mcp/servers", {
+        method: "POST",
+        body: JSON.stringify({
+          name: srv.name, transport: srv.transport || "stdio",
+          command: srv.command, args: srv.args || [], url: srv.url,
+        }),
+      });
+      toast.success(`${srv.name} added`);
+      load();
+    } catch (e: any) { toast.error(e.message); }
+  };
+
+  const addCustom = async () => {
+    if (!newSrv.name.trim()) return;
+    await addServer({
+      name: newSrv.name,
+      transport: newSrv.transport,
+      command: newSrv.command,
+      args: newSrv.args.split(" ").filter(Boolean),
+      url: newSrv.url,
+    });
+    setNewSrv({ name: "", command: "", args: "", url: "", transport: "stdio" });
+    setShowAdd(false);
+  };
+
+  const CAT_COLORS: Record<string, string> = {
+    system: "text-blue-400 bg-blue-500/10 border-blue-500/20",
+    dev: "text-cyan-400 bg-cyan-500/10 border-cyan-500/20",
+    data: "text-green-400 bg-green-500/10 border-green-500/20",
+    search: "text-yellow-400 bg-yellow-500/10 border-yellow-500/20",
+    browser: "text-orange-400 bg-orange-500/10 border-orange-500/20",
+    comms: "text-pink-400 bg-pink-500/10 border-pink-500/20",
+    storage: "text-purple-400 bg-purple-500/10 border-purple-500/20",
+    reasoning: "text-violet-400 bg-violet-500/10 border-violet-500/20",
+  };
+
+  const connectedCount = servers.filter(s => s.status === "connected").length;
+
+  return (
+    <div className="flex-1 overflow-y-auto bg-[#080809]">
+      <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
+
+        {/* Header */}
+        <div className="flex items-start justify-between">
+          <div>
+            <h1 className="text-xl font-bold text-white">MCP Servers</h1>
+            <p className="text-sm text-neutral-500 mt-0.5">Model Context Protocol — extend agents with external tools</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="text-right">
+              <div className="text-base font-bold text-white">{connectedCount}/{servers.length}</div>
+              <div className="text-[10px] text-neutral-600">connected</div>
+            </div>
+            <div className="text-right">
+              <div className="text-base font-bold text-white">{tools.length}</div>
+              <div className="text-[10px] text-neutral-600">tools</div>
+            </div>
+            <button onClick={() => setShowAdd(p => !p)}
+              className={cx("px-4 py-2 rounded-xl text-xs font-semibold transition-colors",
+                showAdd ? "bg-white/10 text-white" : "bg-cyan-600 hover:bg-cyan-500 text-white")}>
+              + Add Server
+            </button>
+          </div>
+        </div>
+
+        {/* Add server form */}
+        <AnimatePresence>
+          {showAdd && (
+            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
+              <div className="bg-white/[0.02] border border-white/8 rounded-2xl p-5 space-y-3">
+                <h3 className="text-sm font-semibold text-white">Add Custom MCP Server</h3>
+                <div className="grid grid-cols-2 gap-3">
+                  <input value={newSrv.name} onChange={e => setNewSrv(p => ({...p, name: e.target.value}))}
+                    placeholder="Server name"
+                    className="bg-neutral-950 border border-white/8 rounded-xl px-3 py-2.5 text-sm text-white placeholder-neutral-700 focus:outline-none focus:border-cyan-600/50" />
+                  <select value={newSrv.transport} onChange={e => setNewSrv(p => ({...p, transport: e.target.value as any}))}
+                    className="bg-neutral-950 border border-white/8 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none">
+                    <option value="stdio">stdio (local command)</option>
+                    <option value="http">HTTP (remote URL)</option>
+                  </select>
+                </div>
+                {newSrv.transport === "stdio" ? (
+                  <div className="grid grid-cols-2 gap-3">
+                    <input value={newSrv.command} onChange={e => setNewSrv(p => ({...p, command: e.target.value}))}
+                      placeholder="Command (e.g. npx)"
+                      className="bg-neutral-950 border border-white/8 rounded-xl px-3 py-2.5 text-sm text-white placeholder-neutral-700 focus:outline-none focus:border-cyan-600/50 font-mono" />
+                    <input value={newSrv.args} onChange={e => setNewSrv(p => ({...p, args: e.target.value}))}
+                      placeholder="Args (e.g. @modelcontextprotocol/server-github)"
+                      className="bg-neutral-950 border border-white/8 rounded-xl px-3 py-2.5 text-sm text-white placeholder-neutral-700 focus:outline-none focus:border-cyan-600/50 font-mono" />
+                  </div>
+                ) : (
+                  <input value={newSrv.url} onChange={e => setNewSrv(p => ({...p, url: e.target.value}))}
+                    placeholder="https://your-mcp-server.com"
+                    className="w-full bg-neutral-950 border border-white/8 rounded-xl px-3 py-2.5 text-sm text-white placeholder-neutral-700 focus:outline-none focus:border-cyan-600/50 font-mono" />
+                )}
+                <div className="flex gap-2 pt-1">
+                  <button onClick={addCustom} disabled={!newSrv.name.trim()}
+                    className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 text-white text-xs font-semibold rounded-xl transition-colors">
+                    Add Server
+                  </button>
+                  <button onClick={() => setShowAdd(false)}
+                    className="px-4 py-2 text-neutral-600 hover:text-neutral-400 text-xs transition-colors">
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Tabs */}
+        <div className="flex gap-2 border-b border-white/8">
+          {([["active", `Active (${servers.length})`], ["discover", `Discover (${popular.length})`]] as const).map(([t, label]) => (
+            <button key={t} onClick={() => setTab(t)}
+              className={cx("pb-3 px-1 text-sm font-medium border-b-2 transition-colors",
+                tab === t ? "border-cyan-500 text-white" : "border-transparent text-neutral-600 hover:text-neutral-400")}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "active" && (
+          <div>
+            {servers.length === 0 ? (
+              <div className="text-center py-16 space-y-3">
+                <Plug className="w-10 h-10 text-neutral-800 mx-auto" />
+                <p className="text-neutral-600 text-sm">No MCP servers connected</p>
+                <p className="text-neutral-700 text-xs">Add a server above or browse popular ones in Discover</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {servers.map((s: any) => (
+                  <div key={s.id} className={cx("rounded-2xl border p-5",
+                    s.status === "connected" ? "bg-white/[0.02] border-white/8" : "bg-white/[0.01] border-white/5")}>
+                    <div className="flex items-start gap-4">
+                      <div className={cx("w-3 h-3 rounded-full flex-shrink-0 mt-1",
+                        s.status === "connected" ? "bg-green-400 animate-pulse" : "bg-neutral-700")} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-3">
+                          <span className="font-semibold text-white text-sm">{s.name}</span>
+                          <span className="text-[10px] text-neutral-600 font-mono">{s.transport}</span>
+                          <span className={cx("text-[10px] px-2 py-0.5 rounded-full border",
+                            s.status === "connected" ? "text-green-400 bg-green-500/8 border-green-500/20" :
+                            "text-neutral-600 border-white/8")}>
+                            {s.status}
+                          </span>
+                        </div>
+                        {s.command && (
+                          <div className="text-xs text-neutral-600 font-mono mt-1">
+                            {s.command} {(s.args || []).join(" ")}
+                          </div>
+                        )}
+                        {(s.tools || []).length > 0 && (
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {(s.tools as any[]).slice(0, 6).map((t: any) => (
+                              <span key={t.name} className="text-[10px] px-2 py-0.5 rounded-lg bg-white/5 border border-white/8 text-neutral-500 font-mono">
+                                {t.name}
+                              </span>
+                            ))}
+                            {(s.tools || []).length > 6 && (
+                              <span className="text-[10px] text-neutral-700">+{s.tools.length - 6} more</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Tools list */}
+            {tools.length > 0 && (
+              <div className="mt-6">
+                <h3 className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-3">Available Tools</h3>
+                <div className="grid grid-cols-3 gap-2">
+                  {tools.map((t: any, i) => (
+                    <div key={i} className="bg-white/[0.02] border border-white/8 rounded-xl p-3">
+                      <div className="text-xs font-mono text-cyan-400 truncate">{t.name}</div>
+                      {t.description && (
+                        <div className="text-[10px] text-neutral-600 mt-1 line-clamp-2">{t.description}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "discover" && (
+          <div className="grid grid-cols-2 gap-3">
+            {popular.map((s: any, i) => {
+              const catClass = CAT_COLORS[s.category] || "text-neutral-400 bg-white/5 border-white/8";
+              const connected = servers.some(srv => srv.name === s.name);
+              return (
+                <div key={i} className="bg-white/[0.02] border border-white/8 rounded-2xl p-4 hover:border-white/15 transition-colors">
+                  <div className="flex items-start gap-3 mb-3">
+                    <span className="text-2xl">{s.icon || "🔌"}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-white">{s.name}</span>
+                        <span className={cx("text-[10px] px-1.5 py-0.5 rounded-full border capitalize", catClass)}>
+                          {s.category}
+                        </span>
+                      </div>
+                      <p className="text-xs text-neutral-600 mt-0.5 line-clamp-2">{s.description}</p>
+                    </div>
+                  </div>
+                  {s.tools && s.tools.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mb-3">
+                      {s.tools.slice(0, 4).map((t: string) => (
+                        <span key={t} className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-neutral-600 font-mono">{t}</span>
+                      ))}
+                      {s.tools.length > 4 && <span className="text-[9px] text-neutral-700">+{s.tools.length - 4}</span>}
+                    </div>
+                  )}
+                  <button onClick={() => addServer(s)} disabled={connected}
+                    className={cx("w-full py-2 rounded-xl text-xs font-semibold transition-colors",
+                      connected ? "bg-green-500/10 border border-green-500/20 text-green-400 cursor-default" :
+                      "bg-white/8 hover:bg-white/12 text-white")}>
+                    {connected ? "✓ Connected" : "Connect"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 // Chat Page
 function ChatPage({ agents }: { agents: AgentInfo[] }) {
@@ -922,171 +1944,8 @@ function ModelsPage() {
 }
 
 // Agents Page
-function AgentsPage({ agents }: { agents: AgentInfo[] }) {
-  const [selected, setSelected] = useState<AgentInfo | null>(null);
-  const [switchMod, setSwitchMod] = useState(""); const [local, setLocal] = useState(false);
-  const doSwitch = async () => {
-    if (!switchMod || !selected) return;
-    try { await apiFetch("/agents/switch-model", { method: "POST", body: JSON.stringify({ model: switchMod, agent_key: selected.id, prefer_local: local }) }); toast.success(`Switched to ${switchMod}`); }
-    catch (e: any) { toast.error(e.message); }
-  };
-  return (
-    <div className="flex h-full">
-      <div className="w-60 border-r border-neutral-800 flex flex-col">
-        <div className="p-4 border-b border-neutral-800"><h2 className="text-sm font-semibold text-white">Active Agents</h2><p className="text-xs text-neutral-600">{agents.length} loaded</p></div>
-        <div className="flex-1 overflow-y-auto p-2">
-          {agents.map(a => {
-            const m = AGENT_META[a.id] || AGENT_META.assistant;
-            return (
-              <button key={a.id} onClick={() => setSelected(a)} className={cx("w-full text-left p-3 rounded-xl mb-1 transition-all flex items-center gap-3", selected?.id === a.id ? "bg-white/8 border border-white/10" : "hover:bg-white/4 border border-transparent")}>
-                <div className={cx("w-8 h-8 rounded-xl bg-gradient-to-br flex items-center justify-center text-white flex-shrink-0", m.color)}>{m.icon}</div>
-                <div className="min-w-0"><p className="text-xs font-medium text-neutral-200 capitalize">{a.name}</p><p className="text-[10px] text-neutral-600 font-mono truncate w-36">{a.model}</p></div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      <div className="flex-1 overflow-y-auto p-6">
-        {selected ? (
-          <div className="max-w-lg space-y-4">
-            <div className="flex items-center gap-4">
-              <div className={cx("w-14 h-14 rounded-2xl bg-gradient-to-br flex items-center justify-center text-white", (AGENT_META[selected.id] || AGENT_META.assistant).color)}>
-                <div className="scale-125">{(AGENT_META[selected.id] || AGENT_META.assistant).icon}</div>
-              </div>
-              <div><h3 className="text-lg font-semibold text-white capitalize">{selected.name}</h3><p className="text-sm text-neutral-500">{selected.description}</p></div>
-            </div>
-            <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-              <p className="text-xs text-neutral-500 mb-1.5 font-medium uppercase tracking-wider">Current Model</p>
-              <code className="text-sm text-blue-300 font-mono">{selected.model}</code>
-              <p className="text-xs text-neutral-600 mt-1">{selected.prefer_local ? "Local (Ollama)" : "Via LiteLLM"}</p>
-            </div>
-            <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-              <p className="text-xs text-neutral-500 mb-2 font-medium uppercase tracking-wider">Tools ({selected.tools.length})</p>
-              <div className="flex flex-wrap gap-1.5">{selected.tools.map(t => <span key={t} className="text-xs px-2 py-0.5 rounded bg-neutral-800 text-neutral-400 font-mono">{t}</span>)}</div>
-            </div>
-            <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-              <p className="text-xs text-neutral-500 mb-3 font-medium uppercase tracking-wider">Switch Model</p>
-              <input value={switchMod} onChange={e => setSwitchMod(e.target.value)} placeholder="e.g. qwen2.5-coder:7b or claude-sonnet-4-6"
-                className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-600 focus:outline-none mb-2" />
-              <div className="flex items-center gap-2 mb-3"><Toggle on={local} onChange={setLocal} /><span className="text-xs text-neutral-500">Use Ollama (local)</span></div>
-              <button onClick={doSwitch} className="px-4 py-2 rounded-lg bg-neutral-700 hover:bg-neutral-600 text-sm text-white transition-colors">Apply</button>
-            </div>
-          </div>
-        ) : (
-          <div className="text-center py-16"><Bot className="w-10 h-10 text-neutral-700 mx-auto mb-3" /><p className="text-neutral-500 text-sm">Select an agent</p></div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// MCP Page
-function MCPPage() {
-  const [servers, setServers] = useState<any[]>([]);
-  const [popular, setPopular] = useState<any[]>([]);
-  const [tools, setTools] = useState<any[]>([]);
-  const load = useCallback(async () => {
-    try { const [s, p, t] = await Promise.all([apiFetch("/mcp/servers"), apiFetch("/mcp/servers/popular"), apiFetch("/mcp/tools")]); setServers(s); setPopular(p); setTools(t); } catch {}
-  }, []);
-  useEffect(() => { load(); }, [load]);
-  const add = async (srv: any) => {
-    try { await apiFetch("/mcp/servers", { method: "POST", body: JSON.stringify({ name: srv.name, transport: srv.transport, command: srv.command, args: srv.args || [], url: srv.url }) }); toast.success(`${srv.name} connected`); load(); }
-    catch (e: any) { toast.error(e.message); }
-  };
-  const catClr: Record<string, string> = { system: "text-blue-400", dev: "text-cyan-400", data: "text-green-400", search: "text-yellow-400", browser: "text-orange-400", comms: "text-pink-400", storage: "text-purple-400", reasoning: "text-violet-400" };
-  return (
-    <div className="flex-1 overflow-y-auto p-6">
-      <div className="max-w-4xl mx-auto space-y-6">
-        <div className="flex items-center justify-between">
-          <div><h2 className="text-sm font-semibold text-white">MCP Servers</h2><p className="text-xs text-neutral-500">Model Context Protocol — external tools for your agents</p></div>
-          <div className="flex items-center gap-3"><span className="text-xs text-neutral-600">{servers.filter((s: any) => s.status === "connected").length}/{servers.length} connected</span><span className="text-xs text-neutral-600">{tools.length} tools</span></div>
-        </div>
-        {servers.length > 0 && (
-          <div>
-            <p className="text-xs font-medium text-neutral-500 mb-2 uppercase tracking-wider">Active</p>
-            <div className="space-y-2">
-              {servers.map((s: any) => (
-                <div key={s.id} className="p-3 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center gap-3">
-                  <div className={cx("w-2 h-2 rounded-full flex-shrink-0", s.status === "connected" ? "bg-green-400" : "bg-neutral-600")} />
-                  <div className="flex-1 min-w-0"><p className="text-sm text-neutral-200 font-medium">{s.name}</p><p className="text-xs text-neutral-600">{s.tool_count} tools · {s.transport}</p></div>
-                  <div className="flex gap-1">{(s.tools || []).slice(0, 3).map((t: any) => <span key={t.name} className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-600 font-mono">{t.name}</span>)}{s.tool_count > 3 && <span className="text-[10px] text-neutral-700">+{s.tool_count - 3}</span>}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        <div>
-          <p className="text-xs font-medium text-neutral-500 mb-3 uppercase tracking-wider">Available</p>
-          <div className="grid grid-cols-2 gap-3">
-            {popular.map((s: any, i: number) => (
-              <div key={i} className="p-4 rounded-xl bg-neutral-900 border border-neutral-800 hover:border-neutral-700 transition-all">
-                <div className="flex items-start justify-between gap-2 mb-2">
-                  <div className="flex items-center gap-2"><span className="text-xl">{s.icon}</span><div><p className="text-sm font-medium text-neutral-200">{s.name}</p><span className={cx("text-[10px] capitalize", catClr[s.category] || "text-neutral-500")}>{s.category}</span></div></div>
-                  <button onClick={() => add(s)} className="text-[11px] px-2.5 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 transition-colors whitespace-nowrap">+ Add</button>
-                </div>
-                <p className="text-xs text-neutral-600">{s.description}</p>
-                {s.env_keys && <p className="text-[10px] text-amber-600 mt-1.5">Needs: {s.env_keys.join(", ")}</p>}
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Knowledge Page
-function KnowledgePage() {
-  const [query, setQuery] = useState(""); const [collection, setCollection] = useState("research");
-  const [results, setResults] = useState<any[]>([]); const [ingestText, setIngestText] = useState(""); const [searching, setSearching] = useState(false);
-  const search = async () => {
-    if (!query) return; setSearching(true);
-    try { const r = await apiFetch(`/knowledge/search?query=${encodeURIComponent(query)}&collection=${collection}&limit=8`); setResults(Array.isArray(r) ? r : []); }
-    catch (e: any) { toast.error(e.message); } finally { setSearching(false); }
-  };
-  const ingest = async () => {
-    if (!ingestText.trim()) return;
-    try { await apiFetch("/knowledge/ingest", { method: "POST", body: JSON.stringify({ content: ingestText, collection }) }); toast.success("Ingested!"); setIngestText(""); }
-    catch (e: any) { toast.error(e.message); }
-  };
-  return (
-    <div className="flex-1 overflow-y-auto p-6">
-      <div className="max-w-2xl mx-auto space-y-6">
-        <div><h2 className="text-sm font-semibold text-white">Knowledge Base</h2><p className="text-xs text-neutral-500">Vector search — Qdrant + Ollama embeddings</p></div>
-        <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-          <p className="text-xs font-medium text-neutral-500 mb-3 uppercase tracking-wider">Search</p>
-          <div className="flex gap-2 mb-2">
-            <input value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === "Enter" && search()} placeholder="Semantic search..."
-              className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-600 focus:outline-none" />
-            <select value={collection} onChange={e => setCollection(e.target.value)} className="bg-neutral-800 border border-neutral-700 rounded-lg px-2 py-2 text-sm text-neutral-400 focus:outline-none">
-              {["research","coding","docs","general"].map(c => <option key={c}>{c}</option>)}
-            </select>
-            <button onClick={search} disabled={searching} className="px-4 py-2 rounded-lg bg-neutral-700 hover:bg-neutral-600 text-sm text-white transition-colors flex items-center gap-2">
-              {searching ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
-            </button>
-          </div>
-          {results.length > 0 && <div className="space-y-2 mt-3">{results.map((r, i) => (
-            <div key={i} className="p-3 rounded-lg bg-neutral-800 border border-neutral-700">
-              <div className="flex items-center gap-2 mb-1"><span className="text-xs font-mono text-green-400">{(r.score * 100).toFixed(0)}%</span>{r.payload?.source && <span className="text-xs text-neutral-600">{r.payload.source}</span>}</div>
-              <p className="text-xs text-neutral-400">{r.payload?.content?.slice(0, 200)}...</p>
-            </div>
-          ))}</div>}
-        </div>
-        <div className="p-4 rounded-xl bg-neutral-900 border border-neutral-800">
-          <p className="text-xs font-medium text-neutral-500 mb-3 uppercase tracking-wider">Ingest Document</p>
-          <textarea value={ingestText} onChange={e => setIngestText(e.target.value)} placeholder="Paste document text..." rows={4}
-            className="w-full bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2.5 text-sm text-neutral-300 placeholder-neutral-600 focus:outline-none resize-none mb-2" />
-          <button onClick={ingest} className="px-4 py-2 rounded-lg bg-blue-500/20 border border-blue-500/30 text-blue-400 text-sm hover:bg-blue-500/30 transition-colors flex items-center gap-2"><Upload className="w-3.5 h-3.5" /> Ingest</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Settings Page
 
 
-// ─── OpenClaw Page ─────────────────────────────────────────────────────────────
 function OpenClawPage() {
   const [provider, setProvider] = useState("ollama");
   const [model, setModel] = useState("");
@@ -2485,7 +3344,7 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {page === "chat"      && <ChatPage agents={agents} />}
         {page === "models"    && <ModelsPage />}
-        {page === "agents"    && <AgentsPage agents={agents} />}
+        {page === "agents"    && <AgentsPage agents={agents} setPage={setPage} />}
         {page === "mcp"       && <MCPPage />}
         {page === "knowledge" && <KnowledgePage />}
         {page === "openclaw"  && <OpenClawPage />}
