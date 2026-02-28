@@ -1379,12 +1379,20 @@ function SettingsPage({ stats }: { stats: any }) {
   const [ollamaUrl, setOllamaUrl] = useState("");
   const [ollamaStatus, setOllamaStatus] = useState<any>(null);
   const [showKey, setShowKey] = useState<Record<string, boolean>>({});
+  // Auth provider states
+  const [googleStatus, setGoogleStatus] = useState<any>(null);
+  const [googleClientId, setGoogleClientId] = useState("");
+  const [googleClientSecret, setGoogleClientSecret] = useState("");
+  const [googleSetupStep, setGoogleSetupStep] = useState<"idle"|"creds"|"auth">("idle");
+  const [openAIGuide, setOpenAIGuide] = useState<any>(null);
+  const [openAIStatus, setOpenAIStatus] = useState<any>(null);
+  const [openAIKey, setOpenAIKey] = useState("");
+  const [oauthWindow, setOauthWindow] = useState<Window|null>(null);
 
   const load = async () => {
     try {
       const data = await apiFetch("/settings/keys");
       setKeys(data);
-      // Pre-fill editing state with empty strings
       const edits: Record<string, string> = {};
       Object.keys(data).forEach(k => { edits[k] = ""; });
       setEditing(edits);
@@ -1394,9 +1402,83 @@ function SettingsPage({ stats }: { stats: any }) {
       setOllamaUrl(o.url || "http://localhost:11434");
       setOllamaStatus(o);
     } catch {}
+    try {
+      const gs = await apiFetch("/auth/google/status");
+      setGoogleStatus(gs);
+    } catch {}
+    try {
+      const os2 = await apiFetch("/auth/openai/status");
+      setOpenAIStatus(os2);
+    } catch {}
+    try {
+      const guide = await apiFetch("/auth/openai/guide");
+      setOpenAIGuide(guide);
+    } catch {}
   };
 
   useEffect(() => { load(); }, []);
+
+  // Listen for OAuth popup completion
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === "google_auth_complete") {
+        load();
+        if (oauthWindow) oauthWindow.close();
+        toast.success(`Connected as ${e.data.name} (${e.data.email})`);
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, [oauthWindow]);
+
+  const startGoogleOAuth = async () => {
+    try {
+      const r = await apiFetch("/auth/google/start");
+      const w = window.open(r.url, "google_auth",
+        "width=600,height=700,scrollbars=yes,resizable=yes");
+      setOauthWindow(w);
+    } catch (e: any) {
+      toast.error(e.message || "Failed to start Google auth");
+    }
+  };
+
+  const revokeGoogle = async () => {
+    await apiFetch("/auth/google/revoke", { method: "POST" });
+    await load();
+    toast.success("Google account disconnected");
+  };
+
+  const testGoogle = async () => {
+    const r = await apiFetch("/auth/google/test");
+    if (r.ok) toast.success(`Gemini works! ${r.latency_ms}ms — ${r.response?.slice(0,60)}`);
+    else toast.error(`Gemini test failed: ${r.error}`);
+  };
+
+  const saveGoogleCreds = async () => {
+    if (!googleClientId || !googleClientSecret) return;
+    await apiFetch("/auth/google/credentials", {
+      method: "POST",
+      body: JSON.stringify({ client_id: googleClientId, client_secret: googleClientSecret }),
+    });
+    await load();
+    setGoogleSetupStep("auth");
+    toast.success("Credentials saved — now sign in with Google");
+  };
+
+  const connectOpenAI = async () => {
+    if (!openAIKey.trim()) return;
+    try {
+      const r = await apiFetch("/auth/openai/setup", {
+        method: "POST",
+        body: JSON.stringify({ api_key: openAIKey.trim() }),
+      });
+      setOpenAIKey("");
+      await load();
+      toast.success(r.message);
+    } catch (e: any) {
+      toast.error(e.message || "Invalid key");
+    }
+  };
 
   const saveKey = async (providerId: string) => {
     const val = editing[providerId]?.trim();
@@ -1580,6 +1662,238 @@ function SettingsPage({ stats }: { stats: any }) {
               const testResult = testResults[pid];
               const isTesting = testing[pid];
               const editVal = editing[pid] || "";
+
+              // ── Gemini: special OAuth card ──
+              if (pid === "gemini") {
+                const isOAuth = info.auth_method === "oauth";
+                const hasApiKey = info.auth_method === "api_key";
+                return (
+                  <div key={pid} className={cx("bg-neutral-900 border rounded-xl p-5",
+                    info.configured ? "border-cyan-800/40" : "border-neutral-800")}>
+                    <div className="flex items-start gap-3 mb-4">
+                      <span className="text-2xl">🔵</span>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold text-white">Google Gemini</span>
+                          <span className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 py-0.5 rounded-full">FREE tier</span>
+                          {info.configured && <span className="text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 px-1.5 py-0.5 rounded-full">✓ active</span>}
+                        </div>
+                        <p className="text-xs text-neutral-500 mt-0.5">Gemini 2.0 Flash, 1.5 Pro — free with your Google account</p>
+                      </div>
+                    </div>
+
+                    {/* OAuth connected state */}
+                    {isOAuth && googleStatus?.connected && (
+                      <div className="mb-4 flex items-center justify-between bg-green-500/5 border border-green-500/20 rounded-lg px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+                          <div>
+                            <div className="text-sm text-green-300 font-medium">{googleStatus.user_name || "Connected"}</div>
+                            <div className="text-xs text-neutral-500">{googleStatus.user_email}</div>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={testGoogle}
+                            className="text-xs px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg transition-colors">
+                            Test
+                          </button>
+                          <button onClick={revokeGoogle}
+                            className="text-xs px-3 py-1.5 bg-red-900/30 hover:bg-red-900/50 border border-red-700/30 text-red-400 rounded-lg transition-colors">
+                            Disconnect
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Auth method chooser */}
+                    {!info.configured && (
+                      <div className="space-y-3">
+                        {/* Option 1: Sign in with Google */}
+                        <div className="bg-neutral-800/60 rounded-xl p-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <div>
+                              <div className="text-sm font-medium text-white">Option 1 — Sign in with Google</div>
+                              <div className="text-xs text-neutral-500">Uses OAuth2 — no API key needed, works with your Google account</div>
+                            </div>
+                            <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full">Recommended</span>
+                          </div>
+
+                          {googleSetupStep === "idle" && (
+                            <button onClick={() => setGoogleSetupStep("creds")}
+                              className="w-full mt-2 flex items-center justify-center gap-2 px-4 py-2.5 bg-white text-neutral-900 text-sm font-medium rounded-lg hover:bg-neutral-100 transition-colors">
+                              <svg className="w-4 h-4" viewBox="0 0 24 24">
+                                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                              </svg>
+                              Set up Google OAuth
+                            </button>
+                          )}
+
+                          {googleSetupStep === "creds" && (
+                            <div className="space-y-2 mt-2">
+                              <p className="text-[11px] text-neutral-400">
+                                Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" className="text-cyan-500 hover:underline">Google Cloud Console</a> → Create credentials → OAuth 2.0 Client ID → Web application. Set redirect URI to <code className="text-xs bg-neutral-700 px-1 rounded">http://your-server:8000/auth/google/callback</code>
+                              </p>
+                              <input value={googleClientId} onChange={e => setGoogleClientId(e.target.value)}
+                                placeholder="Client ID (ends with .apps.googleusercontent.com)"
+                                className="w-full bg-neutral-700 border border-neutral-600 rounded-lg px-3 py-2 text-xs text-neutral-300 placeholder-neutral-600 focus:outline-none focus:border-cyan-600 font-mono" />
+                              <input type="password" value={googleClientSecret} onChange={e => setGoogleClientSecret(e.target.value)}
+                                placeholder="Client Secret"
+                                className="w-full bg-neutral-700 border border-neutral-600 rounded-lg px-3 py-2 text-xs text-neutral-300 placeholder-neutral-600 focus:outline-none focus:border-cyan-600 font-mono" />
+                              <div className="flex gap-2">
+                                <button onClick={saveGoogleCreds} disabled={!googleClientId || !googleClientSecret}
+                                  className="flex-1 px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-30 text-white text-xs rounded-lg transition-colors">
+                                  Save & Continue
+                                </button>
+                                <button onClick={() => setGoogleSetupStep("idle")}
+                                  className="px-3 py-2 bg-neutral-700 text-neutral-400 text-xs rounded-lg">Cancel</button>
+                              </div>
+                            </div>
+                          )}
+
+                          {googleSetupStep === "auth" && (
+                            <button onClick={startGoogleOAuth}
+                              className="w-full mt-2 flex items-center justify-center gap-2 px-4 py-2.5 bg-white text-neutral-900 text-sm font-medium rounded-lg hover:bg-neutral-100 transition-colors">
+                              <svg className="w-4 h-4" viewBox="0 0 24 24">
+                                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                              </svg>
+                              Sign in with Google
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Option 2: API Key */}
+                        <div className="bg-neutral-800/40 rounded-xl p-4">
+                          <div className="text-sm font-medium text-white mb-1">Option 2 — API Key</div>
+                          <div className="text-xs text-neutral-500 mb-2">Get a free key from <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-cyan-600 hover:underline">AI Studio</a> (sign in with Google there)</div>
+                          <div className="flex gap-2">
+                            <input type="password" value={editVal}
+                              onChange={e => setEditing(prev => ({...prev, [pid]: e.target.value}))}
+                              onKeyDown={e => e.key === "Enter" && saveKey(pid)}
+                              placeholder="AIza..."
+                              className="flex-1 bg-neutral-700 border border-neutral-600 rounded-lg px-3 py-2 text-xs text-neutral-300 placeholder-neutral-600 focus:outline-none focus:border-cyan-600 font-mono" />
+                            <button onClick={() => saveKey(pid)} disabled={!editVal.trim()}
+                              className="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-30 text-white text-xs rounded-lg">Save</button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Already configured — show both management options */}
+                    {info.configured && !isOAuth && (
+                      <div className="flex gap-2">
+                        <input type="password" value={editVal}
+                          onChange={e => setEditing(prev => ({...prev, [pid]: e.target.value}))}
+                          placeholder="Replace API key…"
+                          className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-xs text-neutral-300 placeholder-neutral-700 focus:outline-none focus:border-cyan-600 font-mono" />
+                        <button onClick={() => saveKey(pid)} disabled={!editVal.trim()}
+                          className="px-3 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-30 text-white text-xs rounded-lg">Update</button>
+                        <button onClick={() => {
+                            setGoogleSetupStep(googleStatus?.has_client_id ? "auth" : "creds");
+                          }}
+                          className="px-3 py-2 bg-neutral-700 hover:bg-neutral-600 text-neutral-300 text-xs rounded-lg whitespace-nowrap">
+                          Switch to OAuth
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              // ── OpenAI: guided setup card ──
+              if (pid === "openai") {
+                return (
+                  <div key={pid} className={cx("bg-neutral-900 border rounded-xl p-5",
+                    openAIStatus?.valid ? "border-green-800/40" : "border-neutral-800")}>
+                    <div className="flex items-start gap-3 mb-4">
+                      <span className="text-2xl">🟢</span>
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold text-white">OpenAI</span>
+                          {openAIStatus?.valid && <span className="text-[10px] bg-green-500/10 text-green-400 border border-green-500/20 px-1.5 py-0.5 rounded-full">✓ connected</span>}
+                          {openAIStatus?.tier && <span className="text-[10px] text-neutral-600 border border-neutral-700 px-1.5 py-0.5 rounded-full">{openAIStatus.tier}</span>}
+                        </div>
+                        <p className="text-xs text-neutral-500 mt-0.5">GPT-4o, o4-mini — API is separate from your ChatGPT Plus subscription</p>
+                      </div>
+                    </div>
+
+                    {/* Plus note */}
+                    {!openAIStatus?.valid && (
+                      <div className="mb-4 bg-amber-500/5 border border-amber-500/20 rounded-lg px-4 py-3">
+                        <div className="flex gap-2">
+                          <span className="text-amber-500 text-sm">ℹ️</span>
+                          <div>
+                            <div className="text-xs font-medium text-amber-300">ChatGPT Plus ≠ API Access</div>
+                            <div className="text-xs text-neutral-500 mt-0.5">Your Plus subscription is for chat.openai.com. The API uses the same account but has its own billing — minimum $5 top-up, pay per use.</div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Connected state */}
+                    {openAIStatus?.valid && (
+                      <div className="mb-4 flex items-center gap-3 bg-green-500/5 border border-green-500/20 rounded-lg px-4 py-2">
+                        <div className="w-2 h-2 rounded-full bg-green-400" />
+                        <div className="flex-1">
+                          <span className="text-xs text-neutral-400 font-mono">{openAIStatus.masked_key}</span>
+                          <span className="ml-3 text-xs text-neutral-600">{openAIStatus.model_count} models · {openAIStatus.latency_ms}ms</span>
+                        </div>
+                        <button onClick={() => removeKey("openai")}
+                          className="text-xs text-red-500 hover:text-red-400">Remove</button>
+                      </div>
+                    )}
+
+                    {/* Steps guide */}
+                    {openAIGuide && !openAIStatus?.valid && (
+                      <div className="mb-4 space-y-2">
+                        {openAIGuide.steps.map((s: any) => (
+                          <div key={s.step} className="flex gap-3 text-xs">
+                            <span className="w-5 h-5 rounded-full bg-neutral-800 border border-neutral-700 flex items-center justify-center text-[10px] text-neutral-500 flex-shrink-0 mt-0.5">{s.step}</span>
+                            <div className="flex-1">
+                              <span className="text-neutral-300 font-medium">{s.title}</span>
+                              {s.url && (
+                                <a href={s.url} target="_blank" rel="noreferrer"
+                                  className="ml-2 text-cyan-600 hover:text-cyan-400">open →</a>
+                              )}
+                              <div className="text-neutral-600 mt-0.5">{s.description}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Key input */}
+                    <div className="flex gap-2">
+                      <input type="password" value={openAIKey}
+                        onChange={e => setOpenAIKey(e.target.value)}
+                        onKeyDown={e => e.key === "Enter" && connectOpenAI()}
+                        placeholder="sk-proj-... or sk-..."
+                        className="flex-1 bg-neutral-800 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-neutral-300 placeholder-neutral-700 focus:outline-none focus:border-green-600 font-mono" />
+                      <button onClick={connectOpenAI} disabled={!openAIKey.trim()}
+                        className="px-4 py-2 bg-green-700 hover:bg-green-600 disabled:opacity-30 text-white text-sm rounded-lg transition-colors whitespace-nowrap">
+                        Connect
+                      </button>
+                    </div>
+
+                    {/* Cost table */}
+                    {openAIGuide?.cost_estimate && (
+                      <div className="mt-3 flex gap-3 text-[10px]">
+                        {Object.entries(openAIGuide.cost_estimate).map(([model, cost]: [string, any]) => (
+                          <div key={model} className="bg-neutral-800/60 rounded px-2 py-1">
+                            <div className="text-neutral-500">{model.replace(/_/g," ")}</div>
+                            <div className="text-neutral-400">{cost}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
 
               return (
                 <div key={pid} className={cx(

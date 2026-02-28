@@ -294,10 +294,37 @@ def _build_llm(model: str, temperature: float = 0.7, tools: list = None):
                          base_url="https://api.mistral.ai/v1", api_key=keys["mistral"])
     elif provider == "openai" and keys.get("openai"):
         llm = ChatOpenAI(model=model, temperature=temperature, api_key=keys["openai"])
-    elif provider == "gemini" and keys.get("gemini"):
-        llm = ChatOpenAI(model=model, temperature=temperature,
-                         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                         api_key=keys["gemini"])
+    elif provider == "gemini":
+        # Support both API key and Google OAuth2 credentials
+        from dotenv import load_dotenv as _ld
+        _ld(ENV_FILE, override=True)
+        auth_method = os.getenv("GEMINI_AUTH_METHOD", "")
+        if auth_method == "oauth" or (not keys.get("gemini") and os.getenv("GOOGLE_ACCESS_TOKEN")):
+            # Use OAuth2 credentials via google-genai SDK wrapped in a thin LangChain adapter
+            try:
+                from google.oauth2.credentials import Credentials as GCreds
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                import google.auth.transport.requests
+                creds = GCreds(
+                    token=os.getenv("GOOGLE_ACCESS_TOKEN",""),
+                    refresh_token=os.getenv("GOOGLE_REFRESH_TOKEN",""),
+                    token_uri="https://oauth2.googleapis.com/token",
+                    client_id=os.getenv("GOOGLE_CLIENT_ID",""),
+                    client_secret=os.getenv("GOOGLE_CLIENT_SECRET",""),
+                )
+                llm = ChatGoogleGenerativeAI(model=model, temperature=temperature, credentials=creds)
+            except ImportError:
+                # Fallback: use access token as bearer via OpenAI-compat endpoint
+                token = os.getenv("GOOGLE_ACCESS_TOKEN","")
+                llm = ChatOpenAI(model=model, temperature=temperature,
+                                 base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                                 api_key=token or "oauth")
+        elif keys.get("gemini"):
+            llm = ChatOpenAI(model=model, temperature=temperature,
+                             base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                             api_key=keys["gemini"])
+        else:
+            raise RuntimeError("Gemini not configured. Sign in with Google or add a GEMINI_API_KEY in Settings.")
     elif keys.get("openrouter"):
         llm = ChatOpenAI(model=model, temperature=temperature,
                          base_url="https://openrouter.ai/api/v1", api_key=keys["openrouter"])
@@ -358,6 +385,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AgentFlow v2", version="2.0.0", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+# ── Auth routes (Google OAuth2, OpenAI setup) ──────────────────────────────────
+try:
+    from auth_providers import router as auth_router
+    app.include_router(auth_router)
+except ImportError as _auth_err:
+    import logging
+    logging.warning(f"auth_providers not loaded: {_auth_err}")
 
 # ── Request models ─────────────────────────────────────────────────────────────
 class RunAgentReq(BaseModel):
@@ -593,6 +628,11 @@ async def ollama_chat(req: dict):
 
 # ── Cloud providers ────────────────────────────────────────────────────────────
 def _configured(provider_id: str) -> bool:
+    if provider_id == "gemini":
+        from dotenv import load_dotenv as _ld
+        _ld(ENV_FILE, override=True)
+        return bool(_get_key_map().get("gemini") or
+                    (os.getenv("GEMINI_AUTH_METHOD") == "oauth" and os.getenv("GOOGLE_ACCESS_TOKEN")))
     return bool(_get_key_map().get(provider_id))
 
 @app.get("/cloud/providers")
@@ -807,6 +847,26 @@ async def get_api_keys():
     result = {}
     for pid, meta in PROVIDER_META.items():
         raw = keys.get(pid, "")
+        # Gemini may be connected via OAuth instead of API key
+        if pid == "gemini":
+            from dotenv import load_dotenv as _ld
+            _ld(ENV_FILE, override=True)
+            oauth_method = os.getenv("GEMINI_AUTH_METHOD","") == "oauth"
+            oauth_email  = os.getenv("GOOGLE_USER_EMAIL","")
+            oauth_name   = os.getenv("GOOGLE_USER_NAME","")
+            is_configured = bool(raw) or oauth_method
+            masked = (raw[:8]+"..."+raw[-4:]) if len(raw)>12 else ("*"*len(raw) if raw else "")
+            result[pid] = {
+                "provider": pid, "name": meta["name"], "icon": meta["icon"],
+                "color": meta["color"], "docs": meta["docs"], "env_var": meta["key_env"],
+                "configured": is_configured, "masked": masked, "key_length": len(raw),
+                "auth_method": "oauth" if oauth_method else ("api_key" if raw else "none"),
+                "oauth_email": oauth_email, "oauth_name": oauth_name,
+                "get_key_url": "https://aistudio.google.com/app/apikey",
+                "free_tier": True,
+                "description": "Gemini 2.0 Flash, 1.5 Pro — sign in with Google (free) or use API key",
+            }
+            continue
         result[pid] = {
             "provider":    pid,
             "name":        meta["name"],
